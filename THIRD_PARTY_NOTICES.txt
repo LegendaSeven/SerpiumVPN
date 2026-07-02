@@ -1,0 +1,37 @@
+SerpiumVPN - Third-party notices
+
+SerpiumVPN includes or may be distributed with third-party components.
+This file is provided for attribution and license visibility.
+
+1. tg-ws-proxy
+   Author/project: Flowseal/tg-ws-proxy
+   License: MIT License
+   Source: https://github.com/Flowseal/tg-ws-proxy
+   Included/used for: Telegram WS/MTProto local proxy mode.
+   License file: licenses/LICENSE_tg-ws-proxy.txt
+
+2. zapret-discord-youtube
+   Author/project: Flowseal/zapret-discord-youtube
+   License: MIT License, with third-party notices for bol-van/zapret and WinDivert
+   Source: https://github.com/Flowseal/zapret-discord-youtube
+   Included/used for: Windows zapret/winws-based bypass profiles, such as YouTube/Discord modes.
+   License file: licenses/LICENSE_zapret-discord-youtube.txt
+
+3. zapret
+   Author/project: bol-van/zapret
+   License: MIT License
+   Source: https://github.com/bol-van/zapret
+   Included/used for: winws.exe and related DPI/desync tooling/files, if present in this distribution.
+   License file: licenses/LICENSE_zapret_bol-van.txt
+
+4. WinDivert
+   Author/project: basil00/WinDivert
+   License: dual-licensed under LGPLv3 or GPLv2
+   Source: https://github.com/basil00/WinDivert
+   Included/used for: WinDivert.dll / WinDivert64.sys packet interception driver/library, if present in this distribution.
+   License file: licenses/LICENSE_WinDivert.txt
+
+Notes:
+- SerpiumVPN itself is a separate project and is not affiliated with Flowseal, bol-van, WinDivert, Telegram, YouTube, Discord, or Google.
+- The included third-party notices do not claim ownership over third-party projects.
+- If you remove a third-party component from the distribution, you may also remove the matching notice; if you add new third-party code or binaries, add their license/notice here.

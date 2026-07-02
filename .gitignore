@@ -1,0 +1,29 @@
+# Build outputs
+/bin/
+/obj/
+/publish/
+
+# Visual Studio state
+/.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Local runtime data
+/bin_files/logs/
+/bin_files/tgws/TgWsProxy_data/
+/bin_files/tgws/telegram_proxy_link.txt
+
+# Publish profile user state
+/Properties/PublishProfiles/*.pubxml.user
+
+# Packages and archives
+*.nupkg
+*.snupkg
+*.zip
+*.7z
+*.rar
+
+# Logs
+*.log
