@@ -81,6 +81,19 @@ namespace SerpiumVPN
         {
             try
             {
+                try
+                {
+                    _zapretManager.EnsureRequiredUserLists();
+                }
+                catch (Exception ex)
+                {
+                    HostsTextBox.Text =
+                        "# Не удалось создать list-general-user.txt автоматически." + Environment.NewLine +
+                        "# Причина: " + ex.Message + Environment.NewLine +
+                        "# Запустите программу от имени администратора или переустановите через новый Inno-установщик.";
+                    return;
+                }
+
                 if (File.Exists(_listFilePath))
                 {
                     // Читаем файл (с поддержкой UTF-8 без BOM или дефолтной)
@@ -353,6 +366,14 @@ namespace SerpiumVPN
                 else
                 {
                     UpdateStatus(false, "Статус: Ошибка автоподбора");
+                    MessageBox.Show(
+                        "Подходящая стратегия не найдена.\n\n" +
+                        _zapretManager.LastAutoSelectReport + "\n\n" +
+                        "Полный лог: " + _zapretManager.LastAutoSelectLogPath,
+                        "Диагностика автоподбора",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Warning
+                    );
                 }
             }
             catch (OperationCanceledException)

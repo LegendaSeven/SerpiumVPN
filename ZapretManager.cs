@@ -26,6 +26,9 @@ namespace SerpiumVPN
 
         public string? CurrentStrategyName { get; private set; }
         public string LastQualitySummary { get; private set; } = "";
+        public string LastAutoSelectReport { get; private set; } = "";
+        public string? LastAutoSelectLogPath { get; private set; }
+        public string? LastLaunchLogPath { get; private set; }
 
         public ZapretManager()
         {
@@ -99,15 +102,20 @@ namespace SerpiumVPN
             List<string> batFiles = GetStrategyBatFiles();
             string? bestBatPath = null;
             ConnectionQualityResult? bestQuality = null;
+            BeginAutoSelectReport(checkYoutube, checkDiscord, batFiles.Count);
 
             Debug.WriteLine("==================================================");
             Debug.WriteLine($"[AUTO] Старт автоподбора. YouTube: {checkYoutube}, Discord: {checkDiscord}");
             Debug.WriteLine($"[AUTO] Найдено стратегий: {batFiles.Count}");
             Debug.WriteLine("==================================================");
+            AppendAutoSelectReport($"Найдено стратегий: {batFiles.Count}");
 
             foreach (string batPath in batFiles)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                string batFileName = Path.GetFileName(batPath);
+                AppendAutoSelectReport($"Проверяем: {batFileName}");
 
                 StrategyProbeResult result = await TryStartAndCheckStrategyAsync(
                     batPath,
@@ -120,9 +128,14 @@ namespace SerpiumVPN
                 {
                     bestBatPath = batPath;
                     bestQuality = result.Quality;
+                    AppendAutoSelectReport($"OK: {batFileName} - {result.Quality?.Summary}");
 
                     if (preferFirstAcceptable)
                         break;
+                }
+                else
+                {
+                    AppendAutoSelectReport($"FAIL: {batFileName} - {result.Reason}");
                 }
 
                 Stop();
@@ -148,6 +161,11 @@ namespace SerpiumVPN
                 {
                     bestBatPath = generatedBatPath;
                     bestQuality = generatedResult.Quality;
+                    AppendAutoSelectReport($"OK: {Path.GetFileName(generatedBatPath)} - {generatedResult.Quality?.Summary}");
+                }
+                else
+                {
+                    AppendAutoSelectReport($"FAIL: {Path.GetFileName(generatedBatPath)} - {generatedResult.Reason}");
                 }
 
                 Stop();
@@ -160,6 +178,7 @@ namespace SerpiumVPN
                 StartStrategyFromBatPath(bestBatPath);
                 CurrentStrategyName = Path.GetFileName(bestBatPath);
                 LastQualitySummary = bestQuality?.Summary ?? "";
+                AppendAutoSelectReport($"Выбрана стратегия: {CurrentStrategyName}. {LastQualitySummary}");
 
                 if (showMessages)
                 {
@@ -175,12 +194,14 @@ namespace SerpiumVPN
             }
 
             Stop();
+            AppendAutoSelectReport("Итог: подходящая стратегия не найдена.");
 
             if (showMessages)
             {
                 MessageBox.Show(
                     "Ни одна стратегия не подошла по доступности или скорости.\n\n" +
-                    "Проверьте запуск от имени администратора, антивирус/WinDivert и актуальность файлов zapret.",
+                    LastAutoSelectReport + "\n\n" +
+                    "Полный лог: " + LastAutoSelectLogPath,
                     "Автоподбор",
                     MessageBoxButton.OK,
                     MessageBoxImage.Warning
@@ -211,7 +232,7 @@ namespace SerpiumVPN
                 if (!IsRunning)
                 {
                     Debug.WriteLine($"[AUTO FAIL] winws.exe не остался висеть после запуска {batFileName}");
-                    return StrategyProbeResult.Fail();
+                    return StrategyProbeResult.Fail($"winws.exe завершился сразу после запуска. Лог запуска: {LastLaunchLogPath}");
                 }
 
                 ConnectionQualityResult quality = await CheckConnectionQualityAsync(
@@ -232,7 +253,7 @@ namespace SerpiumVPN
                 }
 
                 Debug.WriteLine($"[AUTO FAIL] Проверка сервисов/скорости не прошла: {batFileName}. {quality.Summary}");
-                return StrategyProbeResult.Fail(quality);
+                return StrategyProbeResult.Fail("проверка связи не прошла: " + quality.Summary, quality);
             }
             catch (OperationCanceledException)
             {
@@ -243,9 +264,9 @@ namespace SerpiumVPN
             catch (Exception ex)
             {
                 Debug.WriteLine($"[AUTO ERR] {batFileName}: {ex.Message}");
+                return StrategyProbeResult.Fail(ex.GetType().Name + ": " + ex.Message);
             }
 
-            return StrategyProbeResult.Fail();
         }
 
         private string CreateFallbackStrategyBatFile()
@@ -478,6 +499,7 @@ namespace SerpiumVPN
                 _logsPath,
                 $"winws_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}_{MakeSafeFileName(Path.GetFileNameWithoutExtension(batPath))}.log"
             );
+            LastLaunchLogPath = logPath;
 
             File.WriteAllText(
                 logPath,
@@ -732,6 +754,39 @@ namespace SerpiumVPN
             File.WriteAllText(path, content, Encoding.UTF8);
         }
 
+        private void BeginAutoSelectReport(bool checkYoutube, bool checkDiscord, int strategyCount)
+        {
+            Directory.CreateDirectory(_logsPath);
+            LastAutoSelectLogPath = Path.Combine(_logsPath, $"auto_select_{DateTime.Now:yyyy-MM-dd_HH-mm-ss}.log");
+            LastAutoSelectReport = "";
+
+            AppendAutoSelectReport("Автоподбор стратегий");
+            AppendAutoSelectReport($"BaseDir: {_basePath}");
+            AppendAutoSelectReport($"Bin: {_binPath}");
+            AppendAutoSelectReport($"Lists: {_listsPath}");
+            AppendAutoSelectReport($"winws.exe: {_winwsExePath}");
+            AppendAutoSelectReport($"YouTube: {checkYoutube}; Discord: {checkDiscord}; стратегий: {strategyCount}");
+            AppendAutoSelectReport($"list-general-user.txt: {File.Exists(Path.Combine(_listsPath, "list-general-user.txt"))}");
+        }
+
+        private void AppendAutoSelectReport(string line)
+        {
+            string stampedLine = $"[{DateTime.Now:HH:mm:ss}] {line}";
+            LastAutoSelectReport = string.IsNullOrWhiteSpace(LastAutoSelectReport)
+                ? stampedLine
+                : LastAutoSelectReport + Environment.NewLine + stampedLine;
+
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(LastAutoSelectLogPath))
+                    File.AppendAllText(LastAutoSelectLogPath, stampedLine + Environment.NewLine, Encoding.UTF8);
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[AUTO LOG WARN] {ex.Message}");
+            }
+        }
+
         private int GetStrategySortIndex(string path)
         {
             string name = Path.GetFileNameWithoutExtension(path);
@@ -851,17 +906,19 @@ namespace SerpiumVPN
 
         private sealed class StrategyProbeResult
         {
-            private StrategyProbeResult(bool isAcceptable, ConnectionQualityResult? quality)
+            private StrategyProbeResult(bool isAcceptable, string reason, ConnectionQualityResult? quality)
             {
                 IsAcceptable = isAcceptable;
+                Reason = reason;
                 Quality = quality;
             }
 
             public bool IsAcceptable { get; }
+            public string Reason { get; }
             public ConnectionQualityResult? Quality { get; }
 
-            public static StrategyProbeResult Success(ConnectionQualityResult quality) => new StrategyProbeResult(true, quality);
-            public static StrategyProbeResult Fail(ConnectionQualityResult? quality = null) => new StrategyProbeResult(false, quality);
+            public static StrategyProbeResult Success(ConnectionQualityResult quality) => new StrategyProbeResult(true, "OK", quality);
+            public static StrategyProbeResult Fail(string reason, ConnectionQualityResult? quality = null) => new StrategyProbeResult(false, reason, quality);
         }
     }
 
