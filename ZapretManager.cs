@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net.Http;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using MessageBox = System.Windows.MessageBox;
@@ -83,7 +84,8 @@ namespace SerpiumVPN
             bool checkYoutube,
             bool checkDiscord,
             bool showMessages = true,
-            bool preferFirstAcceptable = false)
+            bool preferFirstAcceptable = false,
+            CancellationToken cancellationToken = default)
         {
             List<string> batFiles = GetStrategyBatFiles();
             string? bestBatPath = null;
@@ -96,7 +98,14 @@ namespace SerpiumVPN
 
             foreach (string batPath in batFiles)
             {
-                StrategyProbeResult result = await TryStartAndCheckStrategyAsync(batPath, checkYoutube, checkDiscord);
+                cancellationToken.ThrowIfCancellationRequested();
+
+                StrategyProbeResult result = await TryStartAndCheckStrategyAsync(
+                    batPath,
+                    checkYoutube,
+                    checkDiscord,
+                    cancellationToken
+                );
 
                 if (result.IsAcceptable && IsBetterQuality(result.Quality, bestQuality))
                 {
@@ -112,12 +121,19 @@ namespace SerpiumVPN
 
             if (bestBatPath == null)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 string generatedBatPath = CreateFallbackStrategyBatFile();
 
                 Debug.WriteLine("");
                 Debug.WriteLine($"[AUTO GENERATE] Все готовые стратегии не подошли. Создана новая: {Path.GetFileName(generatedBatPath)}");
 
-                StrategyProbeResult generatedResult = await TryStartAndCheckStrategyAsync(generatedBatPath, checkYoutube, checkDiscord);
+                StrategyProbeResult generatedResult = await TryStartAndCheckStrategyAsync(
+                    generatedBatPath,
+                    checkYoutube,
+                    checkDiscord,
+                    cancellationToken
+                );
 
                 if (generatedResult.IsAcceptable)
                 {
@@ -130,6 +146,8 @@ namespace SerpiumVPN
 
             if (bestBatPath != null)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+
                 StartStrategyFromBatPath(bestBatPath);
                 CurrentStrategyName = Path.GetFileName(bestBatPath);
                 LastQualitySummary = bestQuality?.Summary ?? "";
@@ -163,7 +181,11 @@ namespace SerpiumVPN
             return false;
         }
 
-        private async Task<StrategyProbeResult> TryStartAndCheckStrategyAsync(string batPath, bool checkYoutube, bool checkDiscord)
+        private async Task<StrategyProbeResult> TryStartAndCheckStrategyAsync(
+            string batPath,
+            bool checkYoutube,
+            bool checkDiscord,
+            CancellationToken cancellationToken)
         {
             string batFileName = Path.GetFileName(batPath);
 
@@ -175,7 +197,7 @@ namespace SerpiumVPN
                 StartStrategyFromBatPath(batPath);
 
                 Debug.WriteLine("[AUTO WAIT] Ждём 2.5 сек для запуска winws/WinDivert...");
-                await Task.Delay(2500);
+                await Task.Delay(2500, cancellationToken);
 
                 if (!IsRunning)
                 {
@@ -183,7 +205,11 @@ namespace SerpiumVPN
                     return StrategyProbeResult.Fail();
                 }
 
-                ConnectionQualityResult quality = await CheckConnectionQualityAsync(checkYoutube, checkDiscord);
+                ConnectionQualityResult quality = await CheckConnectionQualityAsync(
+                    checkYoutube,
+                    checkDiscord,
+                    cancellationToken: cancellationToken
+                );
 
                 if (quality.IsAcceptable)
                 {
@@ -198,6 +224,12 @@ namespace SerpiumVPN
 
                 Debug.WriteLine($"[AUTO FAIL] Проверка сервисов/скорости не прошла: {batFileName}. {quality.Summary}");
                 return StrategyProbeResult.Fail(quality);
+            }
+            catch (OperationCanceledException)
+            {
+                Debug.WriteLine($"[AUTO CANCEL] Остановлено пользователем: {batFileName}");
+                Stop();
+                throw;
             }
             catch (Exception ex)
             {
@@ -262,19 +294,32 @@ namespace SerpiumVPN
         /// <summary>
         /// Проверка доступности выбранных сервисов.
         /// </summary>
-        public async Task<bool> CheckConnectionAsync(bool checkYoutube, bool checkDiscord, int timeoutMs = 3000)
+        public async Task<bool> CheckConnectionAsync(
+            bool checkYoutube,
+            bool checkDiscord,
+            int timeoutMs = 3000,
+            CancellationToken cancellationToken = default)
         {
-            ConnectionQualityResult quality = await CheckConnectionQualityAsync(checkYoutube, checkDiscord, timeoutMs);
+            ConnectionQualityResult quality = await CheckConnectionQualityAsync(
+                checkYoutube,
+                checkDiscord,
+                timeoutMs,
+                cancellationToken
+            );
             LastQualitySummary = quality.Summary;
             return quality.IsAcceptable;
         }
 
-        public async Task<ConnectionQualityResult> CheckConnectionQualityAsync(bool checkYoutube, bool checkDiscord, int timeoutMs = 5000)
+        public async Task<ConnectionQualityResult> CheckConnectionQualityAsync(
+            bool checkYoutube,
+            bool checkDiscord,
+            int timeoutMs = 5000,
+            CancellationToken cancellationToken = default)
         {
             if (!checkYoutube && !checkDiscord)
             {
                 Debug.WriteLine("[CHECK] Сервисы не выбраны. Проверяем сеть через Cloudflare...");
-                return await QuickMeasureUrlAsync("https://1.1.1.1", "Cloudflare", timeoutMs);
+                return await QuickMeasureUrlAsync("https://1.1.1.1", "Cloudflare", timeoutMs, cancellationToken);
             }
 
             List<ConnectionQualityResult> results = new List<ConnectionQualityResult>();
@@ -282,13 +327,13 @@ namespace SerpiumVPN
             if (checkYoutube)
             {
                 Debug.WriteLine("[CHECK] Тестируем YouTube...");
-                results.Add(await QuickMeasureUrlAsync("https://www.youtube.com", "YouTube", timeoutMs));
+                results.Add(await QuickMeasureUrlAsync("https://www.youtube.com", "YouTube", timeoutMs, cancellationToken));
             }
 
             if (checkDiscord)
             {
                 Debug.WriteLine("[CHECK] Тестируем Discord...");
-                results.Add(await QuickMeasureUrlAsync("https://discord.com", "Discord", timeoutMs));
+                results.Add(await QuickMeasureUrlAsync("https://discord.com", "Discord", timeoutMs, cancellationToken));
             }
 
             if (results.Count == 0)
@@ -302,7 +347,11 @@ namespace SerpiumVPN
             return new ConnectionQualityResult(isAcceptable, latency, speed, summary);
         }
 
-        private async Task<ConnectionQualityResult> QuickMeasureUrlAsync(string url, string name, int timeoutMs)
+        private async Task<ConnectionQualityResult> QuickMeasureUrlAsync(
+            string url,
+            string name,
+            int timeoutMs,
+            CancellationToken cancellationToken = default)
         {
             Stopwatch stopwatch = Stopwatch.StartNew();
 
@@ -316,7 +365,8 @@ namespace SerpiumVPN
                 using HttpRequestMessage request = new HttpRequestMessage(HttpMethod.Get, url);
                 using HttpResponseMessage response = await client.SendAsync(
                     request,
-                    HttpCompletionOption.ResponseHeadersRead
+                    HttpCompletionOption.ResponseHeadersRead,
+                    cancellationToken
                 );
 
                 bool reachable = response.IsSuccessStatusCode || (int)response.StatusCode < 500;
@@ -326,11 +376,14 @@ namespace SerpiumVPN
                 int bytesRead = 0;
                 byte[] buffer = new byte[8192];
 
-                await using Stream stream = await response.Content.ReadAsStreamAsync();
+                await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken);
 
                 while (bytesRead < 192 * 1024)
                 {
-                    int read = await stream.ReadAsync(buffer.AsMemory(0, Math.Min(buffer.Length, 192 * 1024 - bytesRead)));
+                    int read = await stream.ReadAsync(
+                        buffer.AsMemory(0, Math.Min(buffer.Length, 192 * 1024 - bytesRead)),
+                        cancellationToken
+                    );
                     if (read == 0)
                         break;
 
@@ -351,6 +404,11 @@ namespace SerpiumVPN
                     kbps,
                     $"{name}: {elapsedMs} мс, {kbps:F0} КБ/с"
                 );
+            }
+            catch (OperationCanceledException)
+            {
+                stopwatch.Stop();
+                throw;
             }
             catch (Exception ex)
             {

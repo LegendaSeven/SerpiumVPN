@@ -3,6 +3,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
@@ -30,6 +31,7 @@ namespace SerpiumVPN
         private readonly DispatcherTimer _strategyMonitorTimer;
         private readonly UserRuntimeSettings _settings;
         private Forms.NotifyIcon? _trayIcon;
+        private CancellationTokenSource? _strategySelectionCts;
         private bool _isRealExit;
         private bool _isMonitoringStrategy;
 
@@ -314,19 +316,24 @@ namespace SerpiumVPN
         {
             try
             {
+                CancelStrategySelection();
                 ButtonStrategy2.IsEnabled = false;
 
                 // 1. Считываем состояние чекбоксов из UI
                 bool needYoutube = CheckYouTube.IsChecked ?? false;
                 bool needDiscord = CheckDiscord.IsChecked ?? false;
+                SaveServiceSelectionSettings();
 
-                System.Diagnostics.Debug.WriteLine("[UI] Запуск автоподбора на основе выбранных галочек...");
+                _strategySelectionCts = new CancellationTokenSource();
+
+                System.Diagnostics.Debug.WriteLine($"[UI] Запуск автоподбора. YouTube: {needYoutube}, Discord: {needDiscord}");
 
                 // 2. Передаем флаги в ZapretManager
                 bool isStrategyFound = await _zapretManager.AutoSelectStrategyAsync(
                     needYoutube,
                     needDiscord,
-                    preferFirstAcceptable: !_settings.AutoSwitchStrategies
+                    preferFirstAcceptable: !_settings.AutoSwitchStrategies,
+                    cancellationToken: _strategySelectionCts.Token
                 );
 
                 if (isStrategyFound)
@@ -340,12 +347,19 @@ namespace SerpiumVPN
                     UpdateStatus(false, "Статус: Ошибка автоподбора");
                 }
             }
+            catch (OperationCanceledException)
+            {
+                _zapretManager.Stop();
+                UpdateStatus(false, "Статус: Отключен");
+            }
             catch (Exception ex)
             {
                 System.Windows.MessageBox.Show($"Ошибка интерфейса: {ex.Message}", "Ошибка", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
             }
             finally
             {
+                _strategySelectionCts?.Dispose();
+                _strategySelectionCts = null;
                 ButtonStrategy2.IsEnabled = true;
             }
         }
@@ -576,6 +590,7 @@ namespace SerpiumVPN
         {
             try
             {
+                CancelStrategySelection();
                 StopStrategyMonitor();
                 _zapretManager.Stop();
                 _telegramProxyManager.Stop();
@@ -684,6 +699,21 @@ namespace SerpiumVPN
             Close();
         }
 
+        private void CancelStrategySelection()
+        {
+            if (_strategySelectionCts == null)
+                return;
+
+            try
+            {
+                _strategySelectionCts.Cancel();
+            }
+            catch
+            {
+                // ignore cancellation races
+            }
+        }
+
         private void LoadRuntimeSettingsIntoUi()
         {
             CheckYouTube.IsChecked = _settings.CheckYouTube;
@@ -731,10 +761,16 @@ namespace SerpiumVPN
 
         private void SaveCurrentStrategySettings()
         {
-            _settings.CheckYouTube = CheckYouTube.IsChecked ?? false;
-            _settings.CheckDiscord = CheckDiscord.IsChecked ?? false;
+            SaveServiceSelectionSettings();
             _settings.LastStrategyName = _zapretManager.CurrentStrategyName;
             _settings.LastStrategySavedAt = DateTime.Now;
+            _settings.Save();
+        }
+
+        private void SaveServiceSelectionSettings()
+        {
+            _settings.CheckYouTube = CheckYouTube.IsChecked ?? false;
+            _settings.CheckDiscord = CheckDiscord.IsChecked ?? false;
             _settings.Save();
         }
 
@@ -762,7 +798,15 @@ namespace SerpiumVPN
             {
                 bool needYoutube = CheckYouTube.IsChecked ?? false;
                 bool needDiscord = CheckDiscord.IsChecked ?? false;
-                bool currentOk = await _zapretManager.CheckConnectionAsync(needYoutube, needDiscord);
+
+                CancelStrategySelection();
+                _strategySelectionCts = new CancellationTokenSource();
+
+                bool currentOk = await _zapretManager.CheckConnectionAsync(
+                    needYoutube,
+                    needDiscord,
+                    cancellationToken: _strategySelectionCts.Token
+                );
 
                 if (currentOk)
                 {
@@ -772,7 +816,12 @@ namespace SerpiumVPN
 
                 UpdateStatus(true, "Статус: Качество просело, меняем стратегию...");
 
-                bool switched = await _zapretManager.AutoSelectStrategyAsync(needYoutube, needDiscord, showMessages: false);
+                bool switched = await _zapretManager.AutoSelectStrategyAsync(
+                    needYoutube,
+                    needDiscord,
+                    showMessages: false,
+                    cancellationToken: _strategySelectionCts.Token
+                );
                 if (switched)
                 {
                     SaveCurrentStrategySettings();
@@ -783,8 +832,15 @@ namespace SerpiumVPN
                     UpdateStatus(false, "Статус: Нет стратегии с подходящей скоростью");
                 }
             }
+            catch (OperationCanceledException)
+            {
+                _zapretManager.Stop();
+                UpdateStatus(false, "Статус: Отключен");
+            }
             finally
             {
+                _strategySelectionCts?.Dispose();
+                _strategySelectionCts = null;
                 _isMonitoringStrategy = false;
             }
         }
