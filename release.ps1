@@ -15,6 +15,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+if (Get-Variable PSNativeCommandUseErrorActionPreference -ErrorAction SilentlyContinue) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectFile = Join-Path $ProjectRoot "SerpiumVPN.csproj"
@@ -30,6 +33,14 @@ function Write-Step {
     param([string]$Message)
     Write-Host ""
     Write-Host "==> $Message" -ForegroundColor Cyan
+}
+
+function Assert-NativeSuccess {
+    param([string]$CommandName)
+
+    if ($LASTEXITCODE -ne 0) {
+        throw "$CommandName failed with exit code $LASTEXITCODE."
+    }
 }
 
 if (-not (Test-Path $ProjectFile)) {
@@ -68,6 +79,7 @@ dotnet publish $ProjectFile `
     -p:AssemblyVersion=$assemblyVersion `
     -p:FileVersion=$assemblyVersion `
     -o $PublishDir
+Assert-NativeSuccess "dotnet publish SerpiumVPN"
 
 Write-Step "Publishing updater"
 dotnet publish $UpdaterProjectFile `
@@ -78,6 +90,7 @@ dotnet publish $UpdaterProjectFile `
     -p:AssemblyVersion=$assemblyVersion `
     -p:FileVersion=$assemblyVersion `
     -o $UpdaterPublishDir
+Assert-NativeSuccess "dotnet publish SerpiumUpdater"
 
 Copy-Item -LiteralPath (Join-Path $UpdaterPublishDir "SerpiumUpdater.exe") -Destination (Join-Path $PublishDir "SerpiumUpdater.exe") -Force
 Get-ChildItem -LiteralPath $UpdaterPublishDir -Filter "SerpiumUpdater.*" -File | ForEach-Object {
