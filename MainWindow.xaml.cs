@@ -730,6 +730,9 @@ namespace SerpiumVPN
             if (IsRunningAsAdministrator())
                 return true;
 
+            if (!showMessage)
+                return false;
+
             if (showMessage)
             {
                 MessageBoxResult restart = MessageBox.Show(

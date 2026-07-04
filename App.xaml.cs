@@ -1,4 +1,6 @@
 using System;
+using System.Security.AccessControl;
+using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
@@ -19,7 +21,7 @@ namespace SerpiumVPN
 
         protected override void OnStartup(StartupEventArgs e)
         {
-            _singleInstanceMutex = new Mutex(initiallyOwned: true, SingleInstanceMutexName, out bool createdNew);
+            _singleInstanceMutex = CreateSingleInstanceMutex(out bool createdNew);
             if (!createdNew)
             {
                 SignalExistingInstance();
@@ -30,7 +32,7 @@ namespace SerpiumVPN
             base.OnStartup(e);
 
             _shutdownCts = new CancellationTokenSource();
-            _showWindowEvent = new EventWaitHandle(false, EventResetMode.AutoReset, ShowWindowEventName);
+            _showWindowEvent = CreateShowWindowEvent();
             StartShowWindowListener(_shutdownCts.Token);
 
             MainWindow mainWindow = new MainWindow();
@@ -71,6 +73,38 @@ namespace SerpiumVPN
                     });
                 }
             }, cancellationToken);
+        }
+
+        private static Mutex CreateSingleInstanceMutex(out bool createdNew)
+        {
+            SecurityIdentifier everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            MutexSecurity security = new MutexSecurity();
+            security.AddAccessRule(new MutexAccessRule(
+                everyone,
+                MutexRights.FullControl,
+                AccessControlType.Allow
+            ));
+
+            return MutexAcl.Create(initiallyOwned: true, SingleInstanceMutexName, out createdNew, security);
+        }
+
+        private static EventWaitHandle CreateShowWindowEvent()
+        {
+            SecurityIdentifier everyone = new SecurityIdentifier(WellKnownSidType.WorldSid, null);
+            EventWaitHandleSecurity security = new EventWaitHandleSecurity();
+            security.AddAccessRule(new EventWaitHandleAccessRule(
+                everyone,
+                EventWaitHandleRights.FullControl,
+                AccessControlType.Allow
+            ));
+
+            return EventWaitHandleAcl.Create(
+                initialState: false,
+                mode: EventResetMode.AutoReset,
+                name: ShowWindowEventName,
+                createdNew: out _,
+                eventSecurity: security
+            );
         }
 
         private static void SignalExistingInstance()
