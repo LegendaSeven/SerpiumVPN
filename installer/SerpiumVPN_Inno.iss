@@ -43,6 +43,7 @@ Source: "{#SourceDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversi
 [Dirs]
 Name: "{app}\licenses"
 Name: "{app}\bin_files\logs"
+Name: "{app}\bin_files\lists"
 Name: "{app}\bin_files\tgws"
 Name: "{app}\bin_files\tgws\TgWsProxy_data"
 
@@ -54,6 +55,33 @@ Name: "{autodesktop}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"; Tasks: deskt
 Filename: "{app}\SerpiumVPN.exe"; Description: "{cm:LaunchProgram,SerpiumVPN}"; Flags: shellexec nowait postinstall skipifsilent; Tasks: runasadmin; Verb: runas
 
 [Code]
+procedure EnsureTextFile(Path: String; Content: String);
+begin
+  if not FileExists(Path) then
+  begin
+    SaveStringToFile(Path, Content, False);
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+begin
+  if CurStep = ssPostInstall then
+  begin
+    EnsureTextFile(
+      ExpandConstant('{app}\bin_files\lists\list-general-user.txt'),
+      '# Never leave this file empty'#13#10'domain.example.abc'#13#10
+    );
+    EnsureTextFile(
+      ExpandConstant('{app}\bin_files\lists\list-exclude-user.txt'),
+      '# User exclusions'#13#10
+    );
+    EnsureTextFile(
+      ExpandConstant('{app}\bin_files\lists\ipset-exclude-user.txt'),
+      '# User IP exclusions'#13#10
+    );
+  end;
+end;
+
 procedure CurUninstallStepChanged(UninstallStep: TUninstallStep);
 begin
   if UninstallStep = usPostUninstall then

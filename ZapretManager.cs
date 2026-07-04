@@ -37,6 +37,15 @@ namespace SerpiumVPN
             _winwsExePath = Path.Combine(_binPath, "winws.exe");
 
             Directory.CreateDirectory(_logsPath);
+
+            try
+            {
+                EnsureRequiredUserLists();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[LISTS WARN] Не удалось создать пользовательские списки: {ex.Message}");
+            }
         }
 
         /// <summary>
@@ -456,6 +465,8 @@ namespace SerpiumVPN
             if (!File.Exists(batPath))
                 throw new FileNotFoundException($"Bat-файл не найден: {batPath}");
 
+            EnsureRequiredUserLists();
+
             string arguments = ExtractWinwsArgumentsFromBat(batPath);
 
             if (string.IsNullOrWhiteSpace(arguments))
@@ -693,6 +704,32 @@ namespace SerpiumVPN
                 })
                 .OrderBy(GetStrategySortIndex)
                 .ToList();
+        }
+
+        public void EnsureRequiredUserLists()
+        {
+            Directory.CreateDirectory(_listsPath);
+
+            EnsureTextFile(
+                Path.Combine(_listsPath, "list-general-user.txt"),
+                "# Never leave this file empty" + Environment.NewLine + "domain.example.abc" + Environment.NewLine
+            );
+            EnsureTextFile(
+                Path.Combine(_listsPath, "list-exclude-user.txt"),
+                "# User exclusions" + Environment.NewLine
+            );
+            EnsureTextFile(
+                Path.Combine(_listsPath, "ipset-exclude-user.txt"),
+                "# User IP exclusions" + Environment.NewLine
+            );
+        }
+
+        private static void EnsureTextFile(string path, string content)
+        {
+            if (File.Exists(path))
+                return;
+
+            File.WriteAllText(path, content, Encoding.UTF8);
         }
 
         private int GetStrategySortIndex(string path)

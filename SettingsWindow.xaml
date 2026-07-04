@@ -143,7 +143,7 @@
                             <CheckBox x:Name="CheckAutoSwitchStrategies"
                                       Content="Автосмена стратегии"
                                       Style="{StaticResource ToggleCheckBoxStyle}"
-                                      IsChecked="True"
+                                      IsChecked="False"
                                       Checked="SettingsToggle_Changed"
                                       Unchecked="SettingsToggle_Changed"/>
                             <TextBlock Text="Когда включено, программа сама меняет стратегию, если текущая просела по качеству связи." Style="{StaticResource HintTextStyle}"/>

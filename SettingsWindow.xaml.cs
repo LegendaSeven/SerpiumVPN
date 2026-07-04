@@ -34,9 +34,9 @@ namespace SerpiumVPN
             if (_isLoading || _settings == null)
                 return;
 
-            _settings.AutoSwitchStrategies = CheckAutoSwitchStrategies.IsChecked ?? true;
-            _settings.AutoUpdateFiles = CheckAutoUpdateFiles.IsChecked ?? true;
-            _settings.AutoUpdateProgram = CheckAutoUpdateProgram.IsChecked ?? true;
+            _settings.AutoSwitchStrategies = CheckAutoSwitchStrategies.IsChecked == true;
+            _settings.AutoUpdateFiles = CheckAutoUpdateFiles.IsChecked == true;
+            _settings.AutoUpdateProgram = CheckAutoUpdateProgram.IsChecked == true;
             _settings.Save();
         }
 

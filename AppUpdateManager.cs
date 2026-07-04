@@ -88,7 +88,18 @@ namespace SerpiumVPN
 
         private async Task<GithubReleaseInfo> GetLatestReleaseAsync(CancellationToken cancellationToken)
         {
-            using Stream stream = await _httpClient.GetStreamAsync(LatestReleaseApiUrl, cancellationToken);
+            using HttpResponseMessage response = await _httpClient.GetAsync(LatestReleaseApiUrl, cancellationToken);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                throw new InvalidOperationException(
+                    "GitHub не вернул последний релиз. Проверьте, что репозиторий LegendaSeven/SerpiumVPN публичный " +
+                    "и в нём опубликован хотя бы один Release с файлами update.json и SerpiumVPN-*.zip."
+                );
+            }
+
+            response.EnsureSuccessStatusCode();
+
+            await using Stream stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             using JsonDocument document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             JsonElement root = document.RootElement;
 
@@ -115,7 +126,10 @@ namespace SerpiumVPN
             GithubReleaseAsset? manifestAsset = release.FindAsset("update.json");
             if (manifestAsset != null)
             {
-                string json = await _httpClient.GetStringAsync(manifestAsset.DownloadUrl, cancellationToken);
+                string json = await GetStringOrExplain404Async(
+                    manifestAsset.DownloadUrl,
+                    "update.json найден в Release, но GitHub не дал его скачать. Перезагрузите asset update.json в релиз."
+                );
                 GithubUpdateManifest? manifest = JsonSerializer.Deserialize<GithubUpdateManifest>(
                     json,
                     new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
@@ -152,6 +166,14 @@ namespace SerpiumVPN
                 HttpCompletionOption.ResponseHeadersRead,
                 cancellationToken
             );
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                throw new InvalidOperationException(
+                    "Архив обновления не найден на GitHub: " + url + "\n\n" +
+                    "Проверьте, что в Release загружен файл с точно таким же именем, как указано в update.json."
+                );
+            }
 
             response.EnsureSuccessStatusCode();
 
@@ -217,6 +239,16 @@ namespace SerpiumVPN
         }
 
         private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
+
+        private async Task<string> GetStringOrExplain404Async(string url, string notFoundMessage)
+        {
+            using HttpResponseMessage response = await _httpClient.GetAsync(url);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                throw new InvalidOperationException(notFoundMessage + "\n\nURL: " + url);
+
+            response.EnsureSuccessStatusCode();
+            return await response.Content.ReadAsStringAsync();
+        }
     }
 
     public sealed record AppUpdateCheckResult(
