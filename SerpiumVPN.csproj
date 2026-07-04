@@ -16,6 +16,8 @@
 
 	<ItemGroup>
 	  <None Remove="serpium_vpn.ico" />
+	  <Compile Remove="SerpiumUpdater\**\*.cs" />
+	  <None Remove="SerpiumUpdater\**\*" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -27,10 +29,6 @@
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
 		<None Update=".github\workflows\release.yml" Link="GitHub Actions\release.yml" />
-	</ItemGroup>
-
-	<ItemGroup>
-	  <PackageReference Include="Velopack" Version="0.*" />
 	</ItemGroup>
 
 </Project>

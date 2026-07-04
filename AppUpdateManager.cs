@@ -1,73 +1,222 @@
 using System;
+using System.Diagnostics;
+using System.IO;
+using System.Net.Http;
+using System.Reflection;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Velopack;
-using Velopack.Sources;
 
 namespace SerpiumVPN
 {
     public sealed class AppUpdateManager
     {
-        private const string ReleasesUrl = "https://github.com/LegendaSeven/SerpiumVPN";
+        private const string LatestReleaseApiUrl = "https://api.github.com/repos/LegendaSeven/SerpiumVPN/releases/latest";
+        private const string UpdaterExeName = "SerpiumUpdater.exe";
 
-        private readonly UpdateManager _updateManager;
-        private VelopackAsset? _readyToApplyUpdate;
+        private readonly HttpClient _httpClient;
+        private PendingAppUpdate? _pendingUpdate;
 
         public AppUpdateManager()
         {
-            _updateManager = new UpdateManager(
-                new GithubSource(ReleasesUrl, accessToken: null, prerelease: false, downloader: null)
-            );
+            _httpClient = new HttpClient();
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("SerpiumVPN-Updater");
         }
 
-        public bool IsInstalled => _updateManager.IsInstalled || _updateManager.IsPortable;
-
-        public string CurrentVersion => _updateManager.CurrentVersion?.ToString() ?? "dev";
-
-        public string InstallDiagnostics =>
-            $"Velopack: Installed={_updateManager.IsInstalled}, Portable={_updateManager.IsPortable}, Version={CurrentVersion}\n" +
-            $"EXE: {Environment.ProcessPath ?? "unknown"}\n" +
-            $"Папка запуска: {AppContext.BaseDirectory}";
+        public string CurrentVersion =>
+            Assembly.GetExecutingAssembly().GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
+            Assembly.GetExecutingAssembly().GetName().Version?.ToString(3) ??
+            "0.0.0";
 
         public async Task<AppUpdateCheckResult> CheckDownloadAndApplyAsync(
             IProgress<int>? downloadProgress,
             CancellationToken cancellationToken = default)
         {
-            if (!IsInstalled)
-                return AppUpdateCheckResult.NotInstalled(CurrentVersion, InstallDiagnostics);
+            GithubReleaseInfo release = await GetLatestReleaseAsync(cancellationToken);
+            GithubUpdateManifest manifest = await ResolveManifestAsync(release, cancellationToken);
 
-            VelopackAsset? pendingUpdate = _updateManager.UpdatePendingRestart;
-
-            if (pendingUpdate is not null)
-            {
-                _readyToApplyUpdate = pendingUpdate;
-                return AppUpdateCheckResult.ReadyToRestart(pendingUpdate.Version.ToString());
-            }
-
-            UpdateInfo? updateInfo = await _updateManager.CheckForUpdatesAsync();
-
-            if (updateInfo is null)
+            if (!IsNewerVersion(manifest.Version, CurrentVersion))
                 return AppUpdateCheckResult.NoUpdates(CurrentVersion);
 
-            await _updateManager.DownloadUpdatesAsync(
-                updateInfo,
-                progress => downloadProgress?.Report(progress),
-                cancellationToken
+            string archivePath = Path.Combine(
+                Path.GetTempPath(),
+                $"SerpiumVPN-{manifest.Version}-{Guid.NewGuid():N}.zip"
             );
 
-            _readyToApplyUpdate = updateInfo.TargetFullRelease;
-            return AppUpdateCheckResult.ReadyToRestart(updateInfo.TargetFullRelease.Version.ToString());
+            await DownloadFileAsync(manifest.ZipUrl, archivePath, downloadProgress, cancellationToken);
+
+            if (!string.IsNullOrWhiteSpace(manifest.Sha256))
+                VerifySha256(archivePath, manifest.Sha256);
+
+            _pendingUpdate = new PendingAppUpdate(manifest.Version, archivePath);
+            return AppUpdateCheckResult.ReadyToRestart(manifest.Version);
         }
 
         public void RestartAndApply()
         {
-            VelopackAsset? update = _readyToApplyUpdate ?? _updateManager.UpdatePendingRestart;
+            if (_pendingUpdate is null)
+                throw new InvalidOperationException("Обновление скачано, но путь к архиву не сохранён.");
 
-            if (update is null)
-                throw new InvalidOperationException("Обновление скачано, но Velopack не видит пакет для перезапуска.");
+            string baseDir = AppContext.BaseDirectory;
+            string updaterPath = Path.Combine(baseDir, UpdaterExeName);
+            string exePath = Environment.ProcessPath ?? Path.Combine(baseDir, "SerpiumVPN.exe");
 
-            _updateManager.ApplyUpdatesAndRestart(update);
+            if (!File.Exists(updaterPath))
+                throw new FileNotFoundException($"SerpiumUpdater.exe не найден: {updaterPath}");
+
+            string updaterRunPath = Path.Combine(Path.GetTempPath(), $"SerpiumUpdater_{Guid.NewGuid():N}.exe");
+            File.Copy(updaterPath, updaterRunPath, overwrite: true);
+
+            int currentPid = Environment.ProcessId;
+            string args =
+                $"--pid {currentPid} " +
+                $"--target {Quote(baseDir)} " +
+                $"--zip {Quote(_pendingUpdate.ArchivePath)} " +
+                $"--exe {Quote(exePath)}";
+
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = updaterRunPath,
+                Arguments = args,
+                UseShellExecute = true,
+                Verb = "runas"
+            });
+
+            System.Windows.Application.Current.Shutdown();
         }
+
+        private async Task<GithubReleaseInfo> GetLatestReleaseAsync(CancellationToken cancellationToken)
+        {
+            using Stream stream = await _httpClient.GetStreamAsync(LatestReleaseApiUrl, cancellationToken);
+            using JsonDocument document = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+            JsonElement root = document.RootElement;
+
+            string tagName = root.GetProperty("tag_name").GetString() ?? "";
+            string body = root.TryGetProperty("body", out JsonElement bodyElement) ? bodyElement.GetString() ?? "" : "";
+            JsonElement assetsElement = root.GetProperty("assets");
+            List<GithubReleaseAsset> assets = new List<GithubReleaseAsset>();
+
+            foreach (JsonElement asset in assetsElement.EnumerateArray())
+            {
+                assets.Add(new GithubReleaseAsset(
+                    asset.GetProperty("name").GetString() ?? "",
+                    asset.GetProperty("browser_download_url").GetString() ?? ""
+                ));
+            }
+
+            return new GithubReleaseInfo(NormalizeVersion(tagName), body, assets);
+        }
+
+        private async Task<GithubUpdateManifest> ResolveManifestAsync(
+            GithubReleaseInfo release,
+            CancellationToken cancellationToken)
+        {
+            GithubReleaseAsset? manifestAsset = release.FindAsset("update.json");
+            if (manifestAsset != null)
+            {
+                string json = await _httpClient.GetStringAsync(manifestAsset.DownloadUrl, cancellationToken);
+                GithubUpdateManifest? manifest = JsonSerializer.Deserialize<GithubUpdateManifest>(
+                    json,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true }
+                );
+
+                if (manifest != null && !string.IsNullOrWhiteSpace(manifest.ZipUrl))
+                    return manifest;
+            }
+
+            GithubReleaseAsset? zipAsset = release.Assets.FirstOrDefault(asset =>
+                asset.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase) &&
+                asset.Name.Contains("SerpiumVPN", StringComparison.OrdinalIgnoreCase)
+            );
+
+            if (zipAsset == null)
+                throw new InvalidOperationException("В последнем GitHub Release не найден архив обновления SerpiumVPN-*.zip.");
+
+            return new GithubUpdateManifest
+            {
+                Version = release.Version,
+                ZipUrl = zipAsset.DownloadUrl,
+                Notes = release.Notes
+            };
+        }
+
+        private async Task DownloadFileAsync(
+            string url,
+            string destinationPath,
+            IProgress<int>? progress,
+            CancellationToken cancellationToken)
+        {
+            using HttpResponseMessage response = await _httpClient.GetAsync(
+                url,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken
+            );
+
+            response.EnsureSuccessStatusCode();
+
+            long? totalBytes = response.Content.Headers.ContentLength;
+            long downloadedBytes = 0;
+
+            await using Stream source = await response.Content.ReadAsStreamAsync(cancellationToken);
+            await using FileStream destination = File.Create(destinationPath);
+
+            byte[] buffer = new byte[128 * 1024];
+            while (true)
+            {
+                int read = await source.ReadAsync(buffer, cancellationToken);
+                if (read == 0)
+                    break;
+
+                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken);
+                downloadedBytes += read;
+
+                if (totalBytes.HasValue && totalBytes.Value > 0)
+                    progress?.Report((int)(downloadedBytes * 100 / totalBytes.Value));
+            }
+
+            progress?.Report(100);
+        }
+
+        private static void VerifySha256(string filePath, string expectedHash)
+        {
+            using FileStream stream = File.OpenRead(filePath);
+            byte[] hashBytes = SHA256.HashData(stream);
+            string actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+
+            if (!string.Equals(actualHash, expectedHash.Trim().ToLowerInvariant(), StringComparison.Ordinal))
+                throw new InvalidOperationException("Хэш скачанного обновления не совпал. Установка отменена.");
+        }
+
+        private static bool IsNewerVersion(string candidate, string current)
+        {
+            if (!Version.TryParse(NormalizeVersion(candidate), out Version? candidateVersion))
+                return false;
+
+            if (!Version.TryParse(NormalizeVersion(current), out Version? currentVersion))
+                return true;
+
+            return candidateVersion > currentVersion;
+        }
+
+        private static string NormalizeVersion(string value)
+        {
+            string normalized = value.Trim();
+            if (normalized.StartsWith("v", StringComparison.OrdinalIgnoreCase))
+                normalized = normalized[1..];
+
+            int suffixIndex = normalized.IndexOf('-', StringComparison.Ordinal);
+            if (suffixIndex >= 0)
+                normalized = normalized[..suffixIndex];
+
+            int metadataIndex = normalized.IndexOf('+', StringComparison.Ordinal);
+            if (metadataIndex >= 0)
+                normalized = normalized[..metadataIndex];
+
+            return normalized;
+        }
+
+        private static string Quote(string value) => "\"" + value.Replace("\"", "\\\"") + "\"";
     }
 
     public sealed record AppUpdateCheckResult(
@@ -75,9 +224,6 @@ namespace SerpiumVPN
         string Version,
         string Details = "")
     {
-        public static AppUpdateCheckResult NotInstalled(string version, string details) =>
-            new(AppUpdateCheckStatus.NotInstalled, version, details);
-
         public static AppUpdateCheckResult NoUpdates(string version) =>
             new(AppUpdateCheckStatus.NoUpdates, version);
 
@@ -87,8 +233,28 @@ namespace SerpiumVPN
 
     public enum AppUpdateCheckStatus
     {
-        NotInstalled,
         NoUpdates,
         ReadyToRestart
     }
+
+    public sealed class GithubUpdateManifest
+    {
+        public string Version { get; set; } = "";
+        public string ZipUrl { get; set; } = "";
+        public string Sha256 { get; set; } = "";
+        public string Notes { get; set; } = "";
+    }
+
+    internal sealed record GithubReleaseInfo(
+        string Version,
+        string Notes,
+        List<GithubReleaseAsset> Assets)
+    {
+        public GithubReleaseAsset? FindAsset(string name) =>
+            Assets.FirstOrDefault(asset => string.Equals(asset.Name, name, StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal sealed record GithubReleaseAsset(string Name, string DownloadUrl);
+
+    internal sealed record PendingAppUpdate(string Version, string ArchivePath);
 }

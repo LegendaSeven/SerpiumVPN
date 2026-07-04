@@ -27,7 +27,7 @@
       "problemMatcher": []
     },
     {
-      "label": "Build Velopack Release Locally",
+      "label": "Build Zip Release Locally",
       "type": "shell",
       "command": "powershell",
       "args": [

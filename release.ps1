@@ -18,9 +18,13 @@ $ErrorActionPreference = "Stop"
 
 $ProjectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $ProjectFile = Join-Path $ProjectRoot "SerpiumVPN.csproj"
+$UpdaterProjectFile = Join-Path $ProjectRoot "SerpiumUpdater\SerpiumUpdater.csproj"
 $PublishDir = Join-Path $ProjectRoot "publish\app"
+$UpdaterPublishDir = Join-Path $ProjectRoot "publish\updater"
 $ReleaseDir = Join-Path $ProjectRoot "publish\releases"
-$MainExe = "SerpiumVPN.exe"
+$ArchiveName = "SerpiumVPN-$Version.zip"
+$ArchivePath = Join-Path $ReleaseDir $ArchiveName
+$ManifestPath = Join-Path $ReleaseDir "update.json"
 
 function Write-Step {
     param([string]$Message)
@@ -32,9 +36,8 @@ if (-not (Test-Path $ProjectFile)) {
     throw "Project file not found: $ProjectFile"
 }
 
-$vpkCommand = Get-Command "vpk" -ErrorAction SilentlyContinue
-if ($null -eq $vpkCommand) {
-    throw "Velopack CLI was not found. Install it for release builds with: dotnet tool install -g vpk"
+if (-not (Test-Path $UpdaterProjectFile)) {
+    throw "Updater project file not found: $UpdaterProjectFile"
 }
 
 if ($PublishGitHub) {
@@ -45,16 +48,13 @@ if ($PublishGitHub) {
 }
 
 Write-Step "Cleaning release folders"
-if (Test-Path $PublishDir) {
-    Remove-Item -LiteralPath $PublishDir -Recurse -Force
-}
+foreach ($dir in @($PublishDir, $UpdaterPublishDir, $ReleaseDir)) {
+    if (Test-Path $dir) {
+        Remove-Item -LiteralPath $dir -Recurse -Force
+    }
 
-if (Test-Path $ReleaseDir) {
-    Remove-Item -LiteralPath $ReleaseDir -Recurse -Force
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
 }
-
-New-Item -ItemType Directory -Force -Path $PublishDir | Out-Null
-New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
 
 $selfContainedValue = if ($SelfContained) { "true" } else { "false" }
 $assemblyVersion = ($Version -split "-")[0]
@@ -69,20 +69,47 @@ dotnet publish $ProjectFile `
     -p:FileVersion=$assemblyVersion `
     -o $PublishDir
 
-Write-Step "Packing Velopack release"
-vpk pack `
-    -u SerpiumVPN `
-    -v $Version `
-    -p $PublishDir `
-    -e $MainExe `
-    -o $ReleaseDir
+Write-Step "Publishing updater"
+dotnet publish $UpdaterProjectFile `
+    -c Release `
+    -r $Runtime `
+    --self-contained $selfContainedValue `
+    -p:Version=$Version `
+    -p:AssemblyVersion=$assemblyVersion `
+    -p:FileVersion=$assemblyVersion `
+    -o $UpdaterPublishDir
+
+Copy-Item -LiteralPath (Join-Path $UpdaterPublishDir "SerpiumUpdater.exe") -Destination (Join-Path $PublishDir "SerpiumUpdater.exe") -Force
+Get-ChildItem -LiteralPath $UpdaterPublishDir -Filter "SerpiumUpdater.*" -File | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $PublishDir $_.Name) -Force
+}
+
+Write-Step "Packing zip update"
+if (Test-Path $ArchivePath) {
+    Remove-Item -LiteralPath $ArchivePath -Force
+}
+
+Compress-Archive -Path (Join-Path $PublishDir "*") -DestinationPath $ArchivePath -CompressionLevel Optimal
+
+$sha256 = (Get-FileHash -LiteralPath $ArchivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$tag = "v$Version"
+$zipUrl = "https://github.com/$GitHubRepo/releases/download/$tag/$ArchiveName"
+
+$manifest = [ordered]@{
+    version = $Version
+    zipUrl = $zipUrl
+    sha256 = $sha256
+    notes = "SerpiumVPN $Version"
+}
+
+$manifest | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
 
 Write-Step "Release files"
 Get-ChildItem -LiteralPath $ReleaseDir -File | Select-Object Name, Length
 
 Write-Host ""
 if (-not $PublishGitHub) {
-    Write-Host "Upload all files from this folder to GitHub Releases:" -ForegroundColor Green
+    Write-Host "Upload these files to GitHub Releases:" -ForegroundColor Green
     Write-Host $ReleaseDir
     Write-Host ""
     Write-Host "Or publish automatically with:" -ForegroundColor Green
@@ -95,7 +122,6 @@ if ($releaseFiles.Count -eq 0) {
     throw "No release files found in: $ReleaseDir"
 }
 
-$tag = "v$Version"
 $isPrerelease = $Version.Contains("-")
 
 Write-Step "Publishing GitHub release $tag to $GitHubRepo"

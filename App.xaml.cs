@@ -1,5 +1,4 @@
 using System.Windows;
-using Velopack;
 
 namespace SerpiumVPN
 {
@@ -10,7 +9,6 @@ namespace SerpiumVPN
     {
         protected override void OnStartup(StartupEventArgs e)
         {
-            VelopackApp.Build().Run();
             base.OnStartup(e);
         }
     }
