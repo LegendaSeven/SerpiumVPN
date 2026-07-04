@@ -30,7 +30,6 @@ Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-Name: "runasadmin"; Description: "Запустить SerpiumVPN от имени администратора после установки"; GroupDescription: "Первый запуск:"; Flags: checkedonce
 
 [Files]
 Source: "{#SourceDir}\SerpiumVPN.exe"; DestDir: "{app}"; Flags: ignoreversion
@@ -52,8 +51,7 @@ Name: "{group}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"
 Name: "{autodesktop}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\SerpiumVPN.exe"; Description: "{cm:LaunchProgram,SerpiumVPN}"; Flags: shellexec nowait postinstall skipifsilent; Tasks: runasadmin; Verb: runas
-
+Filename: "{app}\SerpiumVPN.exe"; Description: "{cm:LaunchProgram,SerpiumVPN}"; Flags: shellexec nowait postinstall skipifsilent
 [Code]
 procedure EnsureTextFile(Path: String; Content: String);
 begin

@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Security.Principal;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -315,9 +314,6 @@ namespace SerpiumVPN
         {
             try
             {
-                if (!EnsureAdministratorForStrategies())
-                    return;
-
                 _zapretManager.StartStrategy(1);
                 SaveCurrentStrategySettings();
                 StartStrategyMonitor();
@@ -334,9 +330,6 @@ namespace SerpiumVPN
         {
             try
             {
-                if (!EnsureAdministratorForStrategies())
-                    return;
-
                 CancelStrategySelection();
                 ButtonStrategy2.IsEnabled = false;
 
@@ -646,8 +639,8 @@ namespace SerpiumVPN
 
         private void MainWindow_StateChanged(object? sender, EventArgs e)
         {
-            if (WindowState == WindowState.Minimized)
-                Hide();
+            // Обычное сворачивание оставляет SerpiumVPN на панели задач.
+            // Скрытие в трей выполняется только при закрытии окна через MainWindow_Closing.
         }
 
         private void InitializeTrayIcon()
@@ -725,61 +718,6 @@ namespace SerpiumVPN
             }
         }
 
-        private bool EnsureAdministratorForStrategies(bool showMessage = true)
-        {
-            if (IsRunningAsAdministrator())
-                return true;
-
-            if (!showMessage)
-                return false;
-
-            if (showMessage)
-            {
-                MessageBoxResult restart = MessageBox.Show(
-                    "Для запуска стратегий обхода нужны права администратора.\n\nПерезапустить SerpiumVPN от имени администратора?",
-                    "Нужны права администратора",
-                    MessageBoxButton.YesNo,
-                    MessageBoxImage.Information
-                );
-
-                if (restart != MessageBoxResult.Yes)
-                    return false;
-            }
-
-            try
-            {
-                string? exePath = Environment.ProcessPath;
-                if (string.IsNullOrWhiteSpace(exePath))
-                    return false;
-
-                _isRealExit = true;
-
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = exePath,
-                    UseShellExecute = true,
-                    Verb = "runas"
-                });
-
-                Close();
-                return false;
-            }
-            catch (Exception ex)
-            {
-                if (showMessage)
-                    MessageBox.Show($"Не удалось перезапустить с правами администратора: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Warning);
-
-                return false;
-            }
-        }
-
-        private static bool IsRunningAsAdministrator()
-        {
-            using WindowsIdentity identity = WindowsIdentity.GetCurrent();
-            WindowsPrincipal principal = new WindowsPrincipal(identity);
-            return principal.IsInRole(WindowsBuiltInRole.Administrator);
-        }
-
         private void LoadRuntimeSettingsIntoUi()
         {
             CheckYouTube.IsChecked = _settings.CheckYouTube;
@@ -793,12 +731,6 @@ namespace SerpiumVPN
 
             try
             {
-                if (!EnsureAdministratorForStrategies(showMessage: false))
-                {
-                    UpdateStatus(false, "Статус: Для автозапуска стратегии нужны права администратора");
-                    return;
-                }
-
                 UpdateStatus(true, $"Статус: Запускаем сохранённую стратегию ({_settings.LastStrategyName})...");
                 _zapretManager.StartStrategy(_settings.LastStrategyName);
                 await Task.Delay(2500);
