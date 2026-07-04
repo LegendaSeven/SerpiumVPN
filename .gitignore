@@ -27,3 +27,7 @@
 
 # Logs
 *.log
+
+# SerpiumUpdater build outputs
+/SerpiumUpdater/bin/
+/SerpiumUpdater/obj/
