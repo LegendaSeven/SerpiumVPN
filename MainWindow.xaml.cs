@@ -695,10 +695,12 @@ namespace SerpiumVPN
             return File.Exists(iconPath) ? new Drawing.Icon(iconPath) : Drawing.SystemIcons.Application;
         }
 
-        private void ShowFromTray()
+        public void ShowFromTray()
         {
             Show();
             WindowState = WindowState.Normal;
+            Topmost = true;
+            Topmost = false;
             Activate();
         }
 
