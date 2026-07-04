@@ -1,0 +1,46 @@
+{
+  "version": "2.0.0",
+  "inputs": [
+    {
+      "id": "releaseVersion",
+      "type": "promptString",
+      "description": "Release version, for example 1.0.1",
+      "default": "1.0.1"
+    }
+  ],
+  "tasks": [
+    {
+      "label": "Publish GitHub Release",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/release.ps1",
+        "-Version",
+        "${input:releaseVersion}",
+        "-SelfContained",
+        "-PublishGitHub"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    },
+    {
+      "label": "Build Velopack Release Locally",
+      "type": "shell",
+      "command": "powershell",
+      "args": [
+        "-ExecutionPolicy",
+        "Bypass",
+        "-File",
+        "${workspaceFolder}/release.ps1",
+        "-Version",
+        "${input:releaseVersion}",
+        "-SelfContained"
+      ],
+      "group": "build",
+      "problemMatcher": []
+    }
+  ]
+}

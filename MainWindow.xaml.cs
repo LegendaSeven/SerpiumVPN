@@ -6,9 +6,15 @@ using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Media;
+using System.Windows.Threading;
 
 // Создаем псевдоним, чтобы убрать конфликт с System.Windows.Shapes.Path
 using IOPath = System.IO.Path;
+using Forms = System.Windows.Forms;
+using Drawing = System.Drawing;
+using MessageBox = System.Windows.MessageBox;
+using Color = System.Windows.Media.Color;
+using ColorConverter = System.Windows.Media.ColorConverter;
 
 namespace SerpiumVPN
 {
@@ -20,6 +26,12 @@ namespace SerpiumVPN
         private readonly ZapretManager _zapretManager;
         private readonly TelegramProxyManager _telegramProxyManager;
         private readonly VendorUpdateManager _vendorUpdateManager;
+        private readonly AppUpdateManager _appUpdateManager;
+        private readonly DispatcherTimer _strategyMonitorTimer;
+        private readonly UserRuntimeSettings _settings;
+        private Forms.NotifyIcon? _trayIcon;
+        private bool _isRealExit;
+        private bool _isMonitoringStrategy;
 
         // Используем IOPath вместо Path, ведем строго к файлу в bin_files
         private readonly string _listFilePath = IOPath.Combine(AppDomain.CurrentDomain.BaseDirectory, "bin_files", "lists", "list-general-user.txt");
@@ -30,19 +42,34 @@ namespace SerpiumVPN
             _zapretManager = new ZapretManager();
             _telegramProxyManager = new TelegramProxyManager();
             _vendorUpdateManager = new VendorUpdateManager();
+            _appUpdateManager = new AppUpdateManager();
+            _settings = UserRuntimeSettings.Load();
+            _strategyMonitorTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromMinutes(2)
+            };
+            _strategyMonitorTimer.Tick += StrategyMonitorTimer_TickAsync;
 
-            // Подписываемся на событие закрытия окна, чтобы при выходе из GUI не оставлять процесс висеть в фоне
             this.Closing += MainWindow_Closing;
+            this.StateChanged += MainWindow_StateChanged;
 
             // Вызываем правильный метод загрузки при старте
             LoadHostsList();
+            LoadRuntimeSettingsIntoUi();
+            InitializeTrayIcon();
 
             Loaded += MainWindow_LoadedAsync;
         }
 
         private async void MainWindow_LoadedAsync(object sender, RoutedEventArgs e)
         {
-            await CheckVendorUpdatesAsync(showSuccessMessage: false);
+            if (_settings.AutoUpdateFiles)
+                await CheckVendorUpdatesAsync(showSuccessMessage: false);
+
+            if (_settings.AutoUpdateProgram)
+                await CheckAppUpdatesAsync(showSuccessMessage: false);
+
+            await RestoreSavedStrategyAsync();
         }
 
         // Читает пользовательский список доменов и выводит его в текстовое поле
@@ -272,6 +299,8 @@ namespace SerpiumVPN
             try
             {
                 _zapretManager.StartStrategy(1);
+                SaveCurrentStrategySettings();
+                StartStrategyMonitor();
                 UpdateStatus(true, "Работает (Способ 1)");
             }
             catch (Exception ex)
@@ -294,11 +323,17 @@ namespace SerpiumVPN
                 System.Diagnostics.Debug.WriteLine("[UI] Запуск автоподбора на основе выбранных галочек...");
 
                 // 2. Передаем флаги в ZapretManager
-                bool isStrategyFound = await _zapretManager.AutoSelectStrategyAsync(needYoutube, needDiscord);
+                bool isStrategyFound = await _zapretManager.AutoSelectStrategyAsync(
+                    needYoutube,
+                    needDiscord,
+                    preferFirstAcceptable: !_settings.AutoSwitchStrategies
+                );
 
                 if (isStrategyFound)
                 {
-                    UpdateStatus(true, "Статус: Работает (Способ 2 - Автоподбор)");
+                    SaveCurrentStrategySettings();
+                    StartStrategyMonitor();
+                    UpdateStatus(true, $"Статус: Работает ({_zapretManager.CurrentStrategyName})");
                 }
                 else
                 {
@@ -358,16 +393,10 @@ namespace SerpiumVPN
             }
         }
 
-        private async void UpdateFiles_ClickAsync(object sender, RoutedEventArgs e)
-        {
-            await CheckVendorUpdatesAsync(showSuccessMessage: true);
-        }
-
         private async Task CheckVendorUpdatesAsync(bool showSuccessMessage)
         {
             try
             {
-                ButtonUpdateFiles.IsEnabled = false;
                 UpdateStatus(true, "Статус: Проверяем обновления файлов...");
 
                 _zapretManager.Stop();
@@ -439,8 +468,107 @@ namespace SerpiumVPN
             }
             finally
             {
-                ButtonUpdateFiles.IsEnabled = true;
+                // SettingsWindow disables its own button while this task runs.
             }
+        }
+
+        private async Task CheckAppUpdatesAsync(bool showSuccessMessage)
+        {
+            try
+            {
+                UpdateStatus(true, "Статус: Проверяем обновление программы...");
+
+                Progress<int> progress = new Progress<int>(percent =>
+                {
+                    UpdateStatus(true, $"Статус: Скачиваем обновление программы... {percent}%");
+                });
+
+                AppUpdateCheckResult result = await _appUpdateManager.CheckDownloadAndApplyAsync(progress);
+
+                switch (result.Status)
+                {
+                    case AppUpdateCheckStatus.NotInstalled:
+                        UpdateStatus(false, "Статус: Dev-сборка без автообновления");
+
+                        if (showSuccessMessage)
+                        {
+                            MessageBox.Show(
+                                "Сейчас запущена копия, которую Velopack не видит как установленную программу.\n\n" +
+                                "Проверка патча работает только если приложение запущено после установки через Velopack Setup.exe: " +
+                                "из ярлыка, меню Пуск или папки LocalAppData, а не из Visual Studio / bin / publish.\n\n" +
+                                "Для проверки обновления установите текущую версию через Setup.exe, закройте debug-копию, " +
+                                "опубликуйте следующую версию в GitHub Releases и запустите установленную программу.\n\n" +
+                                result.Details,
+                                "Обновление программы",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Information
+                            );
+                        }
+
+                        break;
+
+                    case AppUpdateCheckStatus.NoUpdates:
+                        UpdateStatus(false, "Статус: Программа актуальна");
+
+                        if (showSuccessMessage)
+                        {
+                            MessageBox.Show(
+                                $"Обновлений программы нет. Текущая версия: {result.Version}.",
+                                "Обновление программы",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Information
+                            );
+                        }
+                        break;
+
+                    case AppUpdateCheckStatus.ReadyToRestart:
+                        UpdateStatus(false, "Статус: Обновление готово");
+
+                        MessageBoxResult restart = MessageBox.Show(
+                            $"Скачана версия {result.Version}. Перезапустить SerpiumVPN и установить обновление сейчас?",
+                            "Обновление программы",
+                            MessageBoxButton.YesNo,
+                            MessageBoxImage.Question
+                        );
+
+                        if (restart == MessageBoxResult.Yes)
+                        {
+                            _zapretManager.Stop();
+                            _telegramProxyManager.Stop();
+                            _appUpdateManager.RestartAndApply();
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                UpdateStatus(false, "Статус: Ошибка обновления программы");
+                MessageBox.Show(
+                    $"Не удалось проверить или установить обновление программы: {ex.Message}",
+                    "Обновление программы",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Warning
+                );
+            }
+            finally
+            {
+                // SettingsWindow disables its own button while this task runs.
+            }
+        }
+
+        private void Settings_Click(object sender, RoutedEventArgs e)
+        {
+            SettingsWindow settingsWindow = new SettingsWindow(_settings, CheckAppUpdatesAsync, CheckVendorUpdatesAsync)
+            {
+                Owner = this
+            };
+
+            settingsWindow.ShowDialog();
+
+            if (_settings.AutoSwitchStrategies && _zapretManager.IsRunning)
+                StartStrategyMonitor();
+            else
+                StopStrategyMonitor();
         }
 
         // Кнопка: Остановить
@@ -448,6 +576,7 @@ namespace SerpiumVPN
         {
             try
             {
+                StopStrategyMonitor();
                 _zapretManager.Stop();
                 _telegramProxyManager.Stop();
                 UpdateStatus(false, "Статус: Отключен");
@@ -472,9 +601,192 @@ namespace SerpiumVPN
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
-            // Гарантированно тушим winws.exe и Telegram-прокси при закрытии приложения
+            if (!_isRealExit)
+            {
+                e.Cancel = true;
+                Hide();
+                _trayIcon?.ShowBalloonTip(
+                    2500,
+                    "Serpium VPN работает в фоне",
+                    "Окно скрыто. Для полного выхода используйте меню иконки в трее.",
+                    Forms.ToolTipIcon.Info
+                );
+                return;
+            }
+
+            StopStrategyMonitor();
             _zapretManager.Stop();
             _telegramProxyManager.Stop();
+            _trayIcon?.Dispose();
+        }
+
+        private void MainWindow_StateChanged(object? sender, EventArgs e)
+        {
+            if (WindowState == WindowState.Minimized)
+                Hide();
+        }
+
+        private void InitializeTrayIcon()
+        {
+            _trayIcon = new Forms.NotifyIcon
+            {
+                Icon = LoadTrayIcon(),
+                Text = "Serpium VPN",
+                Visible = true
+            };
+
+            Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
+            menu.Items.Add("Открыть", null, (_, _) => Dispatcher.Invoke(ShowFromTray));
+            menu.Items.Add("Остановить обход", null, (_, _) => Dispatcher.Invoke(() =>
+            {
+                StopStrategyMonitor();
+                _zapretManager.Stop();
+                _telegramProxyManager.Stop();
+                UpdateStatus(false, "Статус: Отключен");
+            }));
+            menu.Items.Add("Выход", null, (_, _) => Dispatcher.Invoke(ExitApplication));
+
+            _trayIcon.ContextMenuStrip = menu;
+            _trayIcon.DoubleClick += (_, _) => Dispatcher.Invoke(ShowFromTray);
+        }
+
+        private static Drawing.Icon LoadTrayIcon()
+        {
+            try
+            {
+                string exePath = Environment.ProcessPath ?? System.Diagnostics.Process.GetCurrentProcess().MainModule?.FileName ?? "";
+                if (!string.IsNullOrWhiteSpace(exePath))
+                {
+                    Drawing.Icon? associatedIcon = Drawing.Icon.ExtractAssociatedIcon(exePath);
+                    if (associatedIcon != null)
+                        return associatedIcon;
+                }
+            }
+            catch
+            {
+                // fall through to file/default icon
+            }
+
+            string iconPath = IOPath.Combine(AppDomain.CurrentDomain.BaseDirectory, "serpium_vpn.ico");
+            return File.Exists(iconPath) ? new Drawing.Icon(iconPath) : Drawing.SystemIcons.Application;
+        }
+
+        private void ShowFromTray()
+        {
+            Show();
+            WindowState = WindowState.Normal;
+            Activate();
+        }
+
+        private void ExitApplication()
+        {
+            _isRealExit = true;
+            Close();
+        }
+
+        private void LoadRuntimeSettingsIntoUi()
+        {
+            CheckYouTube.IsChecked = _settings.CheckYouTube;
+            CheckDiscord.IsChecked = _settings.CheckDiscord;
+        }
+
+        private async Task RestoreSavedStrategyAsync()
+        {
+            if (!_settings.AutoStartLastStrategy || string.IsNullOrWhiteSpace(_settings.LastStrategyName))
+                return;
+
+            try
+            {
+                UpdateStatus(true, $"Статус: Запускаем сохранённую стратегию ({_settings.LastStrategyName})...");
+                _zapretManager.StartStrategy(_settings.LastStrategyName);
+                await Task.Delay(2500);
+
+                bool ok = await _zapretManager.CheckConnectionAsync(_settings.CheckYouTube, _settings.CheckDiscord);
+                if (ok)
+                {
+                    StartStrategyMonitor();
+                    UpdateStatus(true, $"Статус: Работает ({_settings.LastStrategyName})");
+                    return;
+                }
+
+                UpdateStatus(true, "Статус: Сохранённая стратегия просела, подбираем новую...");
+                bool selected = await _zapretManager.AutoSelectStrategyAsync(_settings.CheckYouTube, _settings.CheckDiscord, showMessages: false);
+                if (selected)
+                {
+                    SaveCurrentStrategySettings();
+                    StartStrategyMonitor();
+                    UpdateStatus(true, $"Статус: Работает ({_zapretManager.CurrentStrategyName})");
+                }
+                else
+                {
+                    UpdateStatus(false, "Статус: Нет подходящей стратегии");
+                }
+            }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[RESTORE WARN] {ex}");
+                UpdateStatus(false, "Статус: Сохранённая стратегия не запущена");
+            }
+        }
+
+        private void SaveCurrentStrategySettings()
+        {
+            _settings.CheckYouTube = CheckYouTube.IsChecked ?? false;
+            _settings.CheckDiscord = CheckDiscord.IsChecked ?? false;
+            _settings.LastStrategyName = _zapretManager.CurrentStrategyName;
+            _settings.LastStrategySavedAt = DateTime.Now;
+            _settings.Save();
+        }
+
+        private void StartStrategyMonitor()
+        {
+            if (_settings.AutoSwitchStrategies)
+                _strategyMonitorTimer.Start();
+            else
+                _strategyMonitorTimer.Stop();
+        }
+
+        private void StopStrategyMonitor()
+        {
+            _strategyMonitorTimer.Stop();
+        }
+
+        private async void StrategyMonitorTimer_TickAsync(object? sender, EventArgs e)
+        {
+            if (_isMonitoringStrategy || !_settings.AutoSwitchStrategies || !_zapretManager.IsRunning)
+                return;
+
+            _isMonitoringStrategy = true;
+
+            try
+            {
+                bool needYoutube = CheckYouTube.IsChecked ?? false;
+                bool needDiscord = CheckDiscord.IsChecked ?? false;
+                bool currentOk = await _zapretManager.CheckConnectionAsync(needYoutube, needDiscord);
+
+                if (currentOk)
+                {
+                    UpdateStatus(true, $"Статус: Работает ({_zapretManager.CurrentStrategyName})");
+                    return;
+                }
+
+                UpdateStatus(true, "Статус: Качество просело, меняем стратегию...");
+
+                bool switched = await _zapretManager.AutoSelectStrategyAsync(needYoutube, needDiscord, showMessages: false);
+                if (switched)
+                {
+                    SaveCurrentStrategySettings();
+                    UpdateStatus(true, $"Статус: Автосмена: {_zapretManager.CurrentStrategyName}");
+                }
+                else
+                {
+                    UpdateStatus(false, "Статус: Нет стратегии с подходящей скоростью");
+                }
+            }
+            finally
+            {
+                _isMonitoringStrategy = false;
+            }
         }
 
       

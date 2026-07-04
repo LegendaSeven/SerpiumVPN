@@ -83,13 +83,33 @@
                     <RowDefinition Height="Auto"/>
                 </Grid.RowDefinitions>
 
-                <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,25" VerticalAlignment="Center">
-                    <Canvas Width="20" Height="28" Margin="0,3,10,0" SnapsToDevicePixels="True">
-                        <Path Fill="#008744" Data="M9.821,27.126 C13.793,27.126 18.067,24.161 18.067,19.388 C18.067,15.681 14.789,14.654 11.233,14.053 C6.732,13.291 1.933,12.235 1.933,8.026 C1.933,4.004 6.273,0.874 10.179,0.874 C14.085,0.874 17.568,3.245 17.568,3.245 L19.123,0.0 C19.123,0.0 16.033,-1.026 10.179,-1.026 C5.68,-1.026 -0.198,1.72 -0.198,8.026 C-0.198,13.111 4.54,14.288 8.682,14.975 C12.825,15.66 16.333,16.634 16.333,19.388 C16.333,23.328 12.062,25.226 9.821,25.226 C6.719,25.226 2.016,23.012 2.016,23.012 L0.0,26.04 C0.0,26.04 4.887,27.126 9.821,27.126 Z M18.067,1.874 L16.0,1.874 C16.0,1.874 16.5,3.0 16.5,4.0 C16.5,5.0 16.0,6.0 16.0,6.0 L18.0,6.0 L18.067,1.874 Z"/>
-                    </Canvas>
-                    <TextBlock Text="erpium" Foreground="#008744" FontSize="26" FontWeight="Bold" Margin="-3,0,0,0" VerticalAlignment="Center"/>
-                    <TextBlock Text=" VPN" Foreground="#FFFFFF" FontSize="26" FontWeight="Light" VerticalAlignment="Center"/>
-                </StackPanel>
+                <Grid Grid.Row="0" Margin="0,0,0,25" VerticalAlignment="Center">
+                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                        <Canvas Width="20" Height="28" Margin="0,3,10,0" SnapsToDevicePixels="True">
+                            <Path Fill="#008744" Data="M9.821,27.126 C13.793,27.126 18.067,24.161 18.067,19.388 C18.067,15.681 14.789,14.654 11.233,14.053 C6.732,13.291 1.933,12.235 1.933,8.026 C1.933,4.004 6.273,0.874 10.179,0.874 C14.085,0.874 17.568,3.245 17.568,3.245 L19.123,0.0 C19.123,0.0 16.033,-1.026 10.179,-1.026 C5.68,-1.026 -0.198,1.72 -0.198,8.026 C-0.198,13.111 4.54,14.288 8.682,14.975 C12.825,15.66 16.333,16.634 16.333,19.388 C16.333,23.328 12.062,25.226 9.821,25.226 C6.719,25.226 2.016,23.012 2.016,23.012 L0.0,26.04 C0.0,26.04 4.887,27.126 9.821,27.126 Z M18.067,1.874 L16.0,1.874 C16.0,1.874 16.5,3.0 16.5,4.0 C16.5,5.0 16.0,6.0 16.0,6.0 L18.0,6.0 L18.067,1.874 Z"/>
+                        </Canvas>
+                        <TextBlock Text="erpium" Foreground="#008744" FontSize="26" FontWeight="Bold" Margin="-3,0,0,0" VerticalAlignment="Center"/>
+                        <TextBlock Text=" VPN" Foreground="#FFFFFF" FontSize="26" FontWeight="Light" VerticalAlignment="Center"/>
+                    </StackPanel>
+                    <Button x:Name="ButtonSettings"
+                            Content="⚙"
+                            Width="34"
+                            Height="34"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Background="#252530"
+                            Foreground="#E8E8EE"
+                            BorderBrush="#343447"
+                            BorderThickness="1"
+                            FontSize="16"
+                            Click="Settings_Click">
+                        <Button.Resources>
+                            <Style TargetType="Border">
+                                <Setter Property="CornerRadius" Value="8"/>
+                            </Style>
+                        </Button.Resources>
+                    </Button>
+                </Grid>
 
                 <Border Grid.Row="1" Background="#16161F" CornerRadius="8" Padding="15,12" Margin="0,0,0,20" BorderBrush="#252535" BorderThickness="1">
                     <Grid>
@@ -106,7 +126,7 @@
                     </Grid>
                 </Border>
 
-                <StackPanel Grid.Row="2" VerticalAlignment="Center" Margin="0,0,0,0">
+                <StackPanel Grid.Row="2" VerticalAlignment="Top" Margin="0,0,0,0">
                     <TextBlock Text="Выберите сервисы для проверки связи:" Foreground="#888888" FontSize="12" Margin="0,0,0,5"/>
                     <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
                         <CheckBox x:Name="CheckYouTube" Content="YouTube" IsChecked="True" Margin="0,0,15,0"/>
@@ -120,15 +140,6 @@
                     <TextBlock Text="Отдельный режим для Telegram Desktop:" Foreground="#888888" FontSize="12" Margin="0,16,0,8"/>
                     <Button x:Name="ButtonTelegram" Content="Telegram WS-прогон" Height="40" Background="#1E5AA8" Foreground="White" BorderThickness="0" Click="Telegram_ClickAsync"/>
                     <TextBlock Text="Запускает локальный MTProto-прокси 127.0.0.1:1443" Foreground="#6F6F78" FontSize="11" TextWrapping="Wrap" Margin="0,7,0,0"/>
-
-                    <TextBlock Text="Обновления файлов:" Foreground="#888888" FontSize="12" Margin="0,16,0,8"/>
-                    <Button x:Name="ButtonUpdateFiles" Content="Проверить обновления" Height="38" Background="#252530" Foreground="#E8E8EE" BorderBrush="#343447" BorderThickness="1" Click="UpdateFiles_ClickAsync">
-                        <Button.Resources>
-                            <Style TargetType="Border">
-                                <Setter Property="CornerRadius" Value="8"/>
-                            </Style>
-                        </Button.Resources>
-                    </Button>
                 </StackPanel>
 
                 <Button Grid.Row="3" Content="ОСТАНОВИТЬ" Height="45" Margin="0,18,0,0" Background="#FF4F4F" Foreground="White" FontWeight="Bold" BorderThickness="0" Click="Stop_Click">

@@ -6,8 +6,12 @@
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<UseWPF>true</UseWPF>
+		<UseWindowsForms>true</UseWindowsForms>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<ApplicationIcon>serpium_vpn.ico</ApplicationIcon>
+		<AssemblyVersion>1.0.0.0</AssemblyVersion>
+		<FileVersion>1.0.0.0</FileVersion>
+		<Version>1.0.0</Version>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -22,6 +26,11 @@
 		<None Update="bin_files\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
+		<None Update=".github\workflows\release.yml" Link="GitHub Actions\release.yml" />
+	</ItemGroup>
+
+	<ItemGroup>
+	  <PackageReference Include="Velopack" Version="0.*" />
 	</ItemGroup>
 
 </Project>

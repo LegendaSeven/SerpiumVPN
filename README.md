@@ -26,6 +26,32 @@ dotnet build SerpiumVPN.csproj
 
 The project targets `net10.0-windows`.
 
+## App Updates
+
+SerpiumVPN uses Velopack for application self-updates. The in-app "Проверить патч программы" button checks GitHub Releases at:
+
+```text
+https://github.com/LegendaSeven/SerpiumVPN
+```
+
+Local release build:
+
+```powershell
+dotnet tool install -g vpk
+.\release.ps1 -Version 1.0.1
+```
+
+Upload all generated files from `publish\releases` to a GitHub Release, or let GitHub Actions do it.
+
+GitHub Actions release flow:
+
+```powershell
+git tag v1.0.1
+git push origin v1.0.1
+```
+
+The `Release` workflow builds the app on `windows-latest`, packs it with Velopack, creates or updates GitHub Release `v1.0.1`, and uploads the generated `RELEASES`, `.nupkg`, and setup files. You can also start the same workflow manually from GitHub Actions with `Run workflow` and enter the version.
+
 ## Repository Layout
 
 - `MainWindow.xaml` / `MainWindow.xaml.cs` - main desktop UI.
