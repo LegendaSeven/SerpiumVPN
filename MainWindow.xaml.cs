@@ -314,6 +314,7 @@ namespace SerpiumVPN
         {
             try
             {
+                HideStrategySelectionProgress();
                 _zapretManager.StartStrategy(1);
                 SaveCurrentStrategySettings();
                 StartStrategyMonitor();
@@ -342,11 +343,21 @@ namespace SerpiumVPN
 
                 System.Diagnostics.Debug.WriteLine($"[UI] Запуск автоподбора. YouTube: {needYoutube}, Discord: {needDiscord}");
 
+                ShowStrategySelectionProgress("Подбор стратегии...", "Готовимся к проверке стратегий", 0);
+                UpdateStatus(true, "Статус: Подбираем стратегию...");
+
+                Progress<StrategySelectionProgress> selectionProgress = new Progress<StrategySelectionProgress>(progress =>
+                {
+                    ShowStrategySelectionProgress("Подбор стратегии...", progress.Message, progress.Percent);
+                    UpdateStatus(true, $"Статус: Подбор стратегии {progress.CurrentStep}/{progress.TotalSteps}");
+                });
+
                 // 2. Передаем флаги в ZapretManager
                 bool isStrategyFound = await _zapretManager.AutoSelectStrategyAsync(
                     needYoutube,
                     needDiscord,
                     preferFirstAcceptable: !_settings.AutoSwitchStrategies,
+                    progress: selectionProgress,
                     cancellationToken: _strategySelectionCts.Token
                 );
 
@@ -354,6 +365,7 @@ namespace SerpiumVPN
                 {
                     SaveCurrentStrategySettings();
                     StartStrategyMonitor();
+                    ShowStrategySelectionProgress("Стратегия найдена", $"Запущено: {_zapretManager.CurrentStrategyName}", 100);
                     UpdateStatus(true, $"Статус: Работает ({_zapretManager.CurrentStrategyName})");
                 }
                 else
@@ -372,6 +384,7 @@ namespace SerpiumVPN
             catch (OperationCanceledException)
             {
                 _zapretManager.Stop();
+                ShowStrategySelectionProgress("Подбор отменён", "Пользователь остановил подбор стратегии", 0);
                 UpdateStatus(false, "Статус: Отключен");
             }
             catch (Exception ex)
@@ -392,6 +405,7 @@ namespace SerpiumVPN
             try
             {
                 ButtonTelegram.IsEnabled = false;
+                HideStrategySelectionProgress();
                 UpdateStatus(true, "Статус: Запускаем Telegram WS-прокси...");
 
                 TelegramProxyStartResult result = await _telegramProxyManager.StartAsync();
@@ -596,12 +610,29 @@ namespace SerpiumVPN
                 StopStrategyMonitor();
                 _zapretManager.Stop();
                 _telegramProxyManager.Stop();
+                HideStrategySelectionProgress();
                 UpdateStatus(false, "Статус: Отключен");
             }
             catch (Exception ex)
             {
                 MessageBox.Show($"Ошибка при остановке: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
             }
+        }
+
+        private void ShowStrategySelectionProgress(string title, string details, int percent)
+        {
+            AutoSelectPanel.Visibility = Visibility.Visible;
+            AutoSelectTitle.Text = title;
+            AutoSelectDetails.Text = details;
+            AutoSelectProgress.Value = Math.Clamp(percent, 0, 100);
+        }
+
+        private void HideStrategySelectionProgress()
+        {
+            AutoSelectPanel.Visibility = Visibility.Visible;
+            AutoSelectTitle.Text = "Автоподбор стратегии";
+            AutoSelectProgress.Value = 0;
+            AutoSelectDetails.Text = "Готов к поиску рабочей стратегии";
         }
 
         // Обновление UI-индикатора (зеленый/красный кружок)

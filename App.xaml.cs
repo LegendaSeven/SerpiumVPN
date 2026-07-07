@@ -18,10 +18,13 @@ namespace SerpiumVPN
         private Mutex? _singleInstanceMutex;
         private EventWaitHandle? _showWindowEvent;
         private CancellationTokenSource? _shutdownCts;
+        private bool _ownsSingleInstanceMutex;
 
         protected override void OnStartup(StartupEventArgs e)
         {
             _singleInstanceMutex = CreateSingleInstanceMutex(out bool createdNew);
+            _ownsSingleInstanceMutex = createdNew;
+
             if (!createdNew)
             {
                 SignalExistingInstance();
@@ -46,10 +49,25 @@ namespace SerpiumVPN
             _showWindowEvent?.Set();
             _showWindowEvent?.Dispose();
 
-            _singleInstanceMutex?.ReleaseMutex();
+            if (_ownsSingleInstanceMutex)
+            {
+                try
+                {
+                    _singleInstanceMutex?.ReleaseMutex();
+                }
+                catch (ApplicationException)
+                {
+                    // The mutex was not owned by this process anymore. Ignore on shutdown.
+                }
+            }
+
             _singleInstanceMutex?.Dispose();
+            _singleInstanceMutex = null;
+            _ownsSingleInstanceMutex = false;
 
             _shutdownCts?.Dispose();
+            _shutdownCts = null;
+
             base.OnExit(e);
         }
 

@@ -97,12 +97,22 @@ namespace SerpiumVPN
             bool checkDiscord,
             bool showMessages = true,
             bool preferFirstAcceptable = false,
+            IProgress<StrategySelectionProgress>? progress = null,
             CancellationToken cancellationToken = default)
         {
             List<string> batFiles = GetStrategyBatFiles();
             string? bestBatPath = null;
             ConnectionQualityResult? bestQuality = null;
+            int totalSteps = batFiles.Count + 1;
+            int currentStep = 0;
             BeginAutoSelectReport(checkYoutube, checkDiscord, batFiles.Count);
+
+            progress?.Report(new StrategySelectionProgress(
+                currentStep,
+                totalSteps,
+                null,
+                $"Найдено стратегий: {batFiles.Count}. Начинаем проверку..."
+            ));
 
             Debug.WriteLine("==================================================");
             Debug.WriteLine($"[AUTO] Старт автоподбора. YouTube: {checkYoutube}, Discord: {checkDiscord}");
@@ -115,6 +125,13 @@ namespace SerpiumVPN
                 cancellationToken.ThrowIfCancellationRequested();
 
                 string batFileName = Path.GetFileName(batPath);
+                currentStep++;
+                progress?.Report(new StrategySelectionProgress(
+                    currentStep,
+                    totalSteps,
+                    batFileName,
+                    $"Проверяем стратегию {currentStep}/{totalSteps}: {batFileName}"
+                ));
                 AppendAutoSelectReport($"Проверяем: {batFileName}");
 
                 StrategyProbeResult result = await TryStartAndCheckStrategyAsync(
@@ -129,6 +146,12 @@ namespace SerpiumVPN
                     bestBatPath = batPath;
                     bestQuality = result.Quality;
                     AppendAutoSelectReport($"OK: {batFileName} - {result.Quality?.Summary}");
+                    progress?.Report(new StrategySelectionProgress(
+                        currentStep,
+                        totalSteps,
+                        batFileName,
+                        $"Подходит: {batFileName}. {result.Quality?.Summary}"
+                    ));
 
                     if (preferFirstAcceptable)
                         break;
@@ -136,6 +159,12 @@ namespace SerpiumVPN
                 else
                 {
                     AppendAutoSelectReport($"FAIL: {batFileName} - {result.Reason}");
+                    progress?.Report(new StrategySelectionProgress(
+                        currentStep,
+                        totalSteps,
+                        batFileName,
+                        $"Не подошла: {batFileName}. {result.Reason}"
+                    ));
                 }
 
                 Stop();
@@ -144,6 +173,14 @@ namespace SerpiumVPN
             if (bestBatPath == null)
             {
                 cancellationToken.ThrowIfCancellationRequested();
+
+                currentStep = totalSteps;
+                progress?.Report(new StrategySelectionProgress(
+                    currentStep,
+                    totalSteps,
+                    "AUTO GENERATED",
+                    "Готовые стратегии не подошли. Создаём запасную стратегию..."
+                ));
 
                 string generatedBatPath = CreateFallbackStrategyBatFile();
 
@@ -179,6 +216,12 @@ namespace SerpiumVPN
                 CurrentStrategyName = Path.GetFileName(bestBatPath);
                 LastQualitySummary = bestQuality?.Summary ?? "";
                 AppendAutoSelectReport($"Выбрана стратегия: {CurrentStrategyName}. {LastQualitySummary}");
+                progress?.Report(new StrategySelectionProgress(
+                    totalSteps,
+                    totalSteps,
+                    CurrentStrategyName,
+                    $"Найдена стратегия: {CurrentStrategyName}. Запускаем..."
+                ));
 
                 if (showMessages)
                 {
@@ -195,6 +238,12 @@ namespace SerpiumVPN
 
             Stop();
             AppendAutoSelectReport("Итог: подходящая стратегия не найдена.");
+            progress?.Report(new StrategySelectionProgress(
+                totalSteps,
+                totalSteps,
+                null,
+                "Подходящая стратегия не найдена. Можно попробовать ручной режим или другой набор сервисов."
+            ));
 
             if (showMessages)
             {
@@ -920,6 +969,23 @@ namespace SerpiumVPN
             public static StrategyProbeResult Success(ConnectionQualityResult quality) => new StrategyProbeResult(true, "OK", quality);
             public static StrategyProbeResult Fail(string reason, ConnectionQualityResult? quality = null) => new StrategyProbeResult(false, reason, quality);
         }
+    }
+
+    public sealed class StrategySelectionProgress
+    {
+        public StrategySelectionProgress(int currentStep, int totalSteps, string? strategyName, string message)
+        {
+            CurrentStep = Math.Max(0, currentStep);
+            TotalSteps = Math.Max(1, totalSteps);
+            StrategyName = strategyName;
+            Message = message;
+        }
+
+        public int CurrentStep { get; }
+        public int TotalSteps { get; }
+        public string? StrategyName { get; }
+        public string Message { get; }
+        public int Percent => Math.Clamp((int)Math.Round(CurrentStep * 100.0 / TotalSteps), 0, 100);
     }
 
     public sealed class ConnectionQualityResult
