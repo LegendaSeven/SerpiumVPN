@@ -140,7 +140,35 @@
                     <Border x:Name="AutoSelectPanel" Visibility="Visible" Background="#16161F" CornerRadius="8" Padding="12" Margin="0,12,0,0" BorderBrush="#252535" BorderThickness="1">
                         <StackPanel>
                             <TextBlock x:Name="AutoSelectTitle" Text="Автоподбор стратегии" Foreground="#E8E8EE" FontSize="12" FontWeight="SemiBold" TextWrapping="Wrap"/>
-                            <ProgressBar x:Name="AutoSelectProgress" Height="7" Minimum="0" Maximum="100" Value="0" Margin="0,8,0,6"/>
+                            <Border x:Name="AutoSelectProgressTrack"
+        Height="10"
+        Background="#101018"
+        BorderBrush="#303044"
+        BorderThickness="1"
+        CornerRadius="6"
+        ClipToBounds="True"
+        Margin="0,8,0,6">
+    <Grid>
+        <Border x:Name="AutoSelectProgressFill"
+                Width="0"
+                HorizontalAlignment="Left"
+                CornerRadius="6">
+            <Border.Background>
+                <LinearGradientBrush StartPoint="0,0" EndPoint="1,0">
+                    <GradientStop Color="#00A84F" Offset="0"/>
+                    <GradientStop Color="#00FF73" Offset="0.55"/>
+                    <GradientStop Color="#7CFFB0" Offset="1"/>
+                </LinearGradientBrush>
+            </Border.Background>
+            <Border.Effect>
+                <DropShadowEffect Color="#00FF73"
+                                  BlurRadius="10"
+                                  ShadowDepth="0"
+                                  Opacity="0.55"/>
+            </Border.Effect>
+        </Border>
+    </Grid>
+</Border>
                             <TextBlock x:Name="AutoSelectDetails" Text="Готов к поиску рабочей стратегии" Foreground="#8F8F9A" FontSize="11" TextWrapping="Wrap"/>
                         </StackPanel>
                     </Border>

@@ -624,15 +624,35 @@ namespace SerpiumVPN
             AutoSelectPanel.Visibility = Visibility.Visible;
             AutoSelectTitle.Text = title;
             AutoSelectDetails.Text = details;
-            AutoSelectProgress.Value = Math.Clamp(percent, 0, 100);
+            SetAutoSelectProgress(percent);
         }
 
         private void HideStrategySelectionProgress()
         {
             AutoSelectPanel.Visibility = Visibility.Visible;
             AutoSelectTitle.Text = "Автоподбор стратегии";
-            AutoSelectProgress.Value = 0;
+            SetAutoSelectProgress(0);
             AutoSelectDetails.Text = "Готов к поиску рабочей стратегии";
+        }
+
+        private void SetAutoSelectProgress(int percent)
+        {
+            int safePercent = Math.Clamp(percent, 0, 100);
+
+            void ApplyWidth()
+            {
+                double trackWidth = AutoSelectProgressTrack.ActualWidth;
+                AutoSelectProgressFill.Width = trackWidth <= 0
+                    ? 0
+                    : trackWidth * safePercent / 100.0;
+            }
+
+            ApplyWidth();
+
+            if (AutoSelectProgressTrack.ActualWidth <= 0)
+            {
+                Dispatcher.BeginInvoke((Action)ApplyWidth, DispatcherPriority.Loaded);
+            }
         }
 
         // Обновление UI-индикатора (зеленый/красный кружок)
