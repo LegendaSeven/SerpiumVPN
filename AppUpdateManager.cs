@@ -58,33 +58,77 @@ namespace SerpiumVPN
             if (_pendingUpdate is null)
                 throw new InvalidOperationException("Обновление скачано, но путь к архиву не сохранён.");
 
-            string baseDir = AppContext.BaseDirectory;
+            string baseDir = Path.TrimEndingDirectorySeparator(AppContext.BaseDirectory);
             string updaterPath = Path.Combine(baseDir, UpdaterExeName);
             string exePath = Environment.ProcessPath ?? Path.Combine(baseDir, "SerpiumVPN.exe");
 
             if (!File.Exists(updaterPath))
                 throw new FileNotFoundException($"SerpiumUpdater.exe не найден: {updaterPath}");
 
-            string updaterRunPath = Path.Combine(Path.GetTempPath(), $"SerpiumUpdater_{Guid.NewGuid():N}.exe");
+            string updaterRunPath = Path.Combine(
+                Path.GetTempPath(),
+                $"SerpiumUpdater_{Guid.NewGuid():N}.exe"
+            );
+
             File.Copy(updaterPath, updaterRunPath, overwrite: true);
 
             int currentPid = Environment.ProcessId;
-            string args =
-                $"--pid {currentPid} " +
-                $"--target {Quote(baseDir)} " +
-                $"--zip {Quote(_pendingUpdate.ArchivePath)} " +
-                $"--exe {Quote(exePath)}";
+            string bootstrapLogPath = Path.Combine(Path.GetTempPath(), "SerpiumUpdater_bootstrap.log");
 
-            Process.Start(new ProcessStartInfo
+            File.WriteAllText(
+                bootstrapLogPath,
+                $"{DateTime.Now:O} Starting updater{Environment.NewLine}" +
+                $"Updater: {updaterRunPath}{Environment.NewLine}" +
+                $"PID: {currentPid}{Environment.NewLine}" +
+                $"Target: {baseDir}{Environment.NewLine}" +
+                $"ZIP: {_pendingUpdate.ArchivePath}{Environment.NewLine}" +
+                $"EXE: {exePath}{Environment.NewLine}"
+            );
+
+            ProcessStartInfo startInfo = new()
             {
                 FileName = updaterRunPath,
-                Arguments = args,
-                UseShellExecute = true,
-                Verb = "runas"
-            });
+                UseShellExecute = false,
+                WorkingDirectory = Path.GetTempPath(),
+                CreateNoWindow = true
+            };
+
+            startInfo.ArgumentList.Add("--pid");
+            startInfo.ArgumentList.Add(currentPid.ToString());
+            startInfo.ArgumentList.Add("--target");
+            startInfo.ArgumentList.Add(baseDir);
+            startInfo.ArgumentList.Add("--zip");
+            startInfo.ArgumentList.Add(_pendingUpdate.ArchivePath);
+            startInfo.ArgumentList.Add("--exe");
+            startInfo.ArgumentList.Add(exePath);
+
+            File.AppendAllText(
+                bootstrapLogPath,
+                $"{DateTime.Now:O} Starting Process.Start with ArgumentList{Environment.NewLine}"
+            );
+
+            Process? updaterProcess = Process.Start(startInfo);
+            if (updaterProcess is null)
+                throw new InvalidOperationException("Не удалось запустить SerpiumUpdater.exe.");
+
+            File.AppendAllText(
+                bootstrapLogPath,
+                $"{DateTime.Now:O} Updater started, PID: {updaterProcess.Id}{Environment.NewLine}"
+            );
+
+            Thread.Sleep(350);
+
+            if (updaterProcess.HasExited)
+            {
+                throw new InvalidOperationException(
+                    $"SerpiumUpdater завершился сразу после запуска. Код: {updaterProcess.ExitCode}. " +
+                    $"Проверьте лог: {Path.Combine(Path.GetTempPath(), "SerpiumUpdater_error.log")}"
+                );
+            }
 
             System.Windows.Application.Current.Shutdown();
         }
+
 
         private async Task<GithubReleaseInfo> GetLatestReleaseAsync(CancellationToken cancellationToken)
         {
