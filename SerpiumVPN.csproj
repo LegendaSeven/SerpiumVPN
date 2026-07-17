@@ -9,9 +9,11 @@
 		<UseWindowsForms>true</UseWindowsForms>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<ApplicationIcon>serpium_vpn.ico</ApplicationIcon>
-		<AssemblyVersion>1.0.10.0</AssemblyVersion>
-		<FileVersion>1.0.10.0</FileVersion>
-		<Version>1.0.10</Version>
+		<VersionPrefix>1.0.15</VersionPrefix>
+		<VersionSuffix>dev</VersionSuffix>
+		<AssemblyVersion>1.0.15.0</AssemblyVersion>
+		<FileVersion>1.0.15.0</FileVersion>
+		<InformationalVersion>1.0.15-dev</InformationalVersion>
 	</PropertyGroup>
 
 	<ItemGroup>
