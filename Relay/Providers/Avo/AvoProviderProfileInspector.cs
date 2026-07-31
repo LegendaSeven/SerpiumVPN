@@ -11,6 +11,7 @@ internal static class AvoProviderProfileInspector
     {
         ArgumentNullException.ThrowIfNull(plaintextUtf8);
 
+        byte[]? runtimeConfiguration = null;
         try
         {
             using JsonDocument document = JsonDocument.Parse(plaintextUtf8);
@@ -18,27 +19,68 @@ internal static class AvoProviderProfileInspector
                 throw new FormatException("Расшифрованный AVO-профиль не является JSON-объектом.");
 
             JsonElement root = document.RootElement;
-            int inboundCount = GetArrayCount(root, "inbounds");
-            int outboundCount = GetArrayCount(root, "outbounds");
-            int routeRuleCount = GetNestedArrayCount(root, "route", "rules");
-            int dnsServerCount = GetNestedArrayCount(root, "dns", "servers");
-            string engine = LooksLikeSingBox(root) ? "sing-box" : "provider-json";
-            string[] protocols = ReadOutboundTypes(root);
+            string safeSchemaSummary = AvoProviderJsonSchemaInspector.Inspect(root);
 
-            return new ProviderRuntimeProfile(
+            if (LooksLikeSingBox(root))
+            {
+                int inboundCount = GetArrayCount(root, "inbounds");
+                int outboundCount = GetArrayCount(root, "outbounds");
+                int routeRuleCount = GetNestedArrayCount(root, "route", "rules");
+                int dnsServerCount = GetNestedArrayCount(root, "dns", "servers");
+                string[] protocols = ReadOutboundTypes(root);
+
+                runtimeConfiguration = plaintextUtf8;
+                plaintextUtf8 = Array.Empty<byte>();
+
+                ProviderRuntimeProfile nativeProfile = new(
+                    "Avo",
+                    profileId,
+                    "sing-box",
+                    runtimeConfiguration,
+                    protocols,
+                    inboundCount,
+                    outboundCount,
+                    routeRuleCount,
+                    dnsServerCount,
+                    safeSchemaSummary);
+
+                runtimeConfiguration = null;
+                return nativeProfile;
+            }
+
+            AvoProviderJsonMappingResult mapped =
+                AvoProviderJsonMapper.Map(profileId, root);
+            runtimeConfiguration = mapped.ConfigurationUtf8;
+
+            CryptographicOperations.ZeroMemory(plaintextUtf8);
+            plaintextUtf8 = Array.Empty<byte>();
+
+            string combinedSafeSummary =
+                safeSchemaSummary + Environment.NewLine + Environment.NewLine +
+                "Безопасный результат маппинга:" + Environment.NewLine +
+                mapped.SafeMappingSummary;
+
+            ProviderRuntimeProfile mappedProfile = new(
                 "Avo",
                 profileId,
-                engine,
-                plaintextUtf8,
-                protocols,
-                inboundCount,
-                outboundCount,
-                routeRuleCount,
-                dnsServerCount);
+                "sing-box",
+                runtimeConfiguration,
+                mapped.Protocols,
+                mapped.InboundCount,
+                mapped.OutboundCount,
+                mapped.RouteRuleCount,
+                mapped.DnsServerCount,
+                combinedSafeSummary);
+
+            runtimeConfiguration = null;
+            return mappedProfile;
         }
         catch
         {
-            CryptographicOperations.ZeroMemory(plaintextUtf8);
+            if (plaintextUtf8.Length > 0)
+                CryptographicOperations.ZeroMemory(plaintextUtf8);
+            if (runtimeConfiguration is not null)
+                CryptographicOperations.ZeroMemory(runtimeConfiguration);
             throw;
         }
     }
@@ -91,8 +133,11 @@ internal static class AvoProviderProfileInspector
             }
 
             string? type = typeValue.GetString();
-            if (!string.IsNullOrWhiteSpace(type))
+            if (!string.IsNullOrWhiteSpace(type) &&
+                type is not ("direct" or "block" or "urltest" or "selector"))
+            {
                 values.Add(type.Trim());
+            }
         }
 
         return values.OrderBy(item => item, StringComparer.OrdinalIgnoreCase).ToArray();

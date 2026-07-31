@@ -35,3 +35,9 @@ Notes:
 - SerpiumVPN itself is a separate project and is not affiliated with Flowseal, bol-van, WinDivert, Telegram, YouTube, Discord, or Google.
 - The included third-party notices do not claim ownership over third-party projects.
 - If you remove a third-party component from the distribution, you may also remove the matching notice; if you add new third-party code or binaries, add their license/notice here.
+
+sing-box v1.13.15
+Copyright (C) 2022 nekohasekai and contributors
+License: GNU General Public License v3.0 or later
+Project: https://github.com/SagerNet/sing-box
+Local license copy: licenses/LICENSE_sing-box_GPL-3.0-or-later.txt

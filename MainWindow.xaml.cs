@@ -26,6 +26,7 @@ using SerpiumVPN.Relay;
 using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Providers.Avo;
+using SerpiumVPN.Relay.SingBox;
 using SerpiumVPN.Relay.Xray;
 
 namespace SerpiumVPN
@@ -53,6 +54,7 @@ namespace SerpiumVPN
         private readonly SerpiumParser _serpiumParser = new();
         private readonly ProviderEnvelopeAdapterRegistry _providerEnvelopeAdapters = new();
         private readonly SerpiumKeyValidationService _serpiumKeyValidationService = new();
+        private readonly SerpiumSingBoxValidationService _singBoxValidationService = new();
         private readonly SerpiumXraySessionManager _serpiumXraySessionManager = new();
         private SerpiumConnectionProfile? _validatedRelayProfile;
         private ProviderRuntimeProfile? _validatedProviderRuntimeProfile;
@@ -1273,14 +1275,54 @@ namespace SerpiumVPN
                     if (!resolved.Success || resolved.RuntimeProfile is null)
                         throw new InvalidOperationException(resolved.Error);
 
-                    DisposeValidatedProviderRuntimeProfile();
-                    _validatedProviderRuntimeProfile = resolved.RuntimeProfile;
-                    RelayDetectedProfileTextBlock.Text =
-                        BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile);
+                    ProviderRuntimeProfile candidateProfile = resolved.RuntimeProfile;
+                    string singBoxRelayDir = IOPath.Combine(
+                        IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                        "bin_files",
+                        "relay");
 
-                    throw new NotSupportedException(
-                        "AVO-профиль успешно расшифрован и подготовлен. " +
-                        "Запуск через sing-box будет включён в следующем патче MVP7.0A.6.");
+                    SetRelayStatus(
+                        "Статус: профиль раскрыт — выполняем sing-box check без записи JSON на диск…",
+                        WpfBrushes.DeepSkyBlue);
+
+                    SingBoxCheckResult engineCheck;
+                    try
+                    {
+                        engineCheck = await _singBoxValidationService.ValidateAsync(
+                            IOPath.Combine(singBoxRelayDir, "sing-box.exe"),
+                            candidateProfile);
+                    }
+                    catch
+                    {
+                        candidateProfile.Dispose();
+                        throw;
+                    }
+
+                    if (!engineCheck.Success)
+                    {
+                        RelayDetectedProfileTextBlock.Text =
+                            BuildProviderRuntimeProfileSummary(candidateProfile) +
+                            Environment.NewLine + Environment.NewLine +
+                            "Проверка движком:" + Environment.NewLine +
+                            "• " + engineCheck.EngineVersion + Environment.NewLine +
+                            "• " + engineCheck.Message;
+                        candidateProfile.Dispose();
+                        throw new InvalidOperationException(engineCheck.Message);
+                    }
+
+                    DisposeValidatedProviderRuntimeProfile();
+                    _validatedProviderRuntimeProfile = candidateProfile;
+                    RelayDetectedProfileTextBlock.Text =
+                        BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile) +
+                        Environment.NewLine + Environment.NewLine +
+                        "Проверка движком:" + Environment.NewLine +
+                        "• " + engineCheck.EngineVersion + Environment.NewLine +
+                        "• " + engineCheck.Message;
+
+                    SetRelayStatus(
+                        "Статус: AVO-профиль принят sing-box. Реальный запуск TUN будет включён в MVP7.0A.6.",
+                        WpfBrushes.Goldenrod);
+                    return;
                 }
 
                 if (parseResult.Profile is null)
@@ -1446,9 +1488,52 @@ namespace SerpiumVPN
                         return;
                     }
 
-                    _validatedProviderRuntimeProfile = resolved.RuntimeProfile;
+                    ProviderRuntimeProfile candidateProfile = resolved.RuntimeProfile;
+                    string singBoxRelayDir = IOPath.Combine(
+                        IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                        "bin_files",
+                        "relay");
+
+                    SetRelayStatus(
+                        "Статус: профиль расшифрован — проверяем конфигурацию встроенным sing-box…",
+                        WpfBrushes.DeepSkyBlue);
+
+                    SingBoxCheckResult engineCheck;
+                    try
+                    {
+                        engineCheck = await _singBoxValidationService.ValidateAsync(
+                            IOPath.Combine(singBoxRelayDir, "sing-box.exe"),
+                            candidateProfile);
+                    }
+                    catch
+                    {
+                        candidateProfile.Dispose();
+                        throw;
+                    }
+
+                    if (!engineCheck.Success)
+                    {
+                        RelayDetectedProfileTextBlock.Text =
+                            BuildProviderRuntimeProfileSummary(candidateProfile) +
+                            Environment.NewLine + Environment.NewLine +
+                            "Проверка движком:" + Environment.NewLine +
+                            "• " + engineCheck.EngineVersion + Environment.NewLine +
+                            "• " + engineCheck.Message;
+                        candidateProfile.Dispose();
+                        SetRelayStatus(
+                            "Статус: AVO-профиль расшифрован, но sing-box отклонил конфигурацию — " +
+                            engineCheck.Message,
+                            WpfBrushes.OrangeRed);
+                        return;
+                    }
+
+                    _validatedProviderRuntimeProfile = candidateProfile;
                     RelayDetectedProfileTextBlock.Text =
-                        BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile);
+                        BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile) +
+                        Environment.NewLine + Environment.NewLine +
+                        "Проверка движком:" + Environment.NewLine +
+                        "• " + engineCheck.EngineVersion + Environment.NewLine +
+                        "• " + engineCheck.Message;
 
                     string protocols = _validatedProviderRuntimeProfile.Protocols.Count > 0
                         ? string.Join(", ", _validatedProviderRuntimeProfile.Protocols.Select(
@@ -1456,7 +1541,7 @@ namespace SerpiumVPN
                         : "тип протоколов не указан";
 
                     SetRelayStatus(
-                        $"Статус: AVO-ключ работает — профиль расшифрован локально; {protocols}.",
+                        $"Статус: AVO-ключ работает — sing-box принял конфигурацию; {protocols}.",
                         WpfBrushes.LightGreen);
                     return;
                 }
@@ -1551,7 +1636,7 @@ namespace SerpiumVPN
             ProviderRuntimeProfile profile)
         {
             StringBuilder summary = new();
-            summary.Append("AVO · ЛОКАЛЬНО РАСШИФРОВАН");
+            summary.Append("AVO · ПРОФИЛЬ SING-BOX ПОДГОТОВЛЕН");
             summary.AppendLine();
             summary.Append("Профиль: ");
             summary.Append(profile.MaskedProfileId);
@@ -1561,7 +1646,7 @@ namespace SerpiumVPN
             summary.AppendLine();
             summary.Append("Конфигурация: ");
             summary.Append(profile.ConfigurationByteCount);
-            summary.Append(" Б в защищённой памяти процесса");
+            summary.Append(" Б в оперативной памяти процесса");
             summary.AppendLine();
             summary.Append("Входы / выходы: ");
             summary.Append(profile.InboundCount);
@@ -1578,6 +1663,9 @@ namespace SerpiumVPN
                 ? string.Join(", ", profile.Protocols.Select(item => item.ToUpperInvariant()))
                 : "не определены");
             summary.AppendLine();
+            summary.AppendLine();
+            summary.AppendLine("Безопасная схема и результат маппинга:");
+            summary.AppendLine(profile.SafeSchemaSummary);
             summary.Append("Адреса, пароли и полный JSON не выводятся в журнал.");
             return summary.ToString();
         }
@@ -1593,7 +1681,7 @@ namespace SerpiumVPN
             }
 
             return $"Контейнер {envelope.DisplayScheme} распознан. " +
-                   "Подключение через адаптер будет включено на следующем этапе.";
+                   "После проверки будет подготовлен sing-box профиль в памяти.";
         }
 
         private static string BuildProviderEnvelopeSummary(ProviderEnvelope envelope)

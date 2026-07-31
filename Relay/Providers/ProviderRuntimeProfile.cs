@@ -19,7 +19,8 @@ public sealed class ProviderRuntimeProfile : IDisposable
         int inboundCount,
         int outboundCount,
         int routeRuleCount,
-        int dnsServerCount)
+        int dnsServerCount,
+        string safeSchemaSummary = "")
     {
         if (string.IsNullOrWhiteSpace(providerName))
             throw new ArgumentException("Имя провайдера не указано.", nameof(providerName));
@@ -45,6 +46,9 @@ public sealed class ProviderRuntimeProfile : IDisposable
         OutboundCount = Math.Max(0, outboundCount);
         RouteRuleCount = Math.Max(0, routeRuleCount);
         DnsServerCount = Math.Max(0, dnsServerCount);
+        SafeSchemaSummary = string.IsNullOrWhiteSpace(safeSchemaSummary)
+            ? "Структура provider JSON ещё не исследована."
+            : safeSchemaSummary.Trim();
     }
 
     public string ProviderName { get; }
@@ -55,6 +59,7 @@ public sealed class ProviderRuntimeProfile : IDisposable
     public int OutboundCount { get; }
     public int RouteRuleCount { get; }
     public int DnsServerCount { get; }
+    public string SafeSchemaSummary { get; }
     public int ConfigurationByteCount => _configurationUtf8?.Length ?? 0;
     public bool IsDisposed => _configurationUtf8 is null;
 

@@ -14,7 +14,7 @@ using System.Reflection;
 [assembly: System.Reflection.AssemblyConfigurationAttribute("Debug")]
 [assembly: System.Reflection.AssemblyDescriptionAttribute("Platform-neutral contracts for external Serpium engines.")]
 [assembly: System.Reflection.AssemblyFileVersionAttribute("1.0.0.0")]
-[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+68613ca55c0ed49cb457e8d2604f7c65c8fec205")]
+[assembly: System.Reflection.AssemblyInformationalVersionAttribute("1.0.0+1822ddf4b17746c94a5885ba31b5c9db87eba366")]
 [assembly: System.Reflection.AssemblyProductAttribute("Serpium.Engine.Abstractions")]
 [assembly: System.Reflection.AssemblyTitleAttribute("Serpium.Engine.Abstractions")]
 [assembly: System.Reflection.AssemblyVersionAttribute("1.0.0.0")]
