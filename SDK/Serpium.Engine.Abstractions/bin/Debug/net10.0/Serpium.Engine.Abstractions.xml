@@ -1,0 +1,74 @@
+<?xml version="1.0"?>
+<doc>
+    <assembly>
+        <name>Serpium.Engine.Abstractions</name>
+    </assembly>
+    <members>
+        <member name="T:SerpiumVPN.Core.EngineContract">
+            <summary>
+            Public compatibility values shared by Serpium and external engine packages.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.Interfaces.IComponent">
+            <summary>
+            Base lifecycle contract for a Serpium platform component.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.Interfaces.IEngine">
+            <summary>
+            Contract implemented by every connection engine loaded by Serpium.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.Interfaces.IFeature">
+            <summary>
+            Marker contract for a Serpium feature component.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.Interfaces.IRelayGatewayEngine">
+            <summary>
+            Optional capability implemented by engines that can expose a Relay gateway.
+            The contract contains no UI dependencies, so external engines remain platform-neutral.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.Interfaces.IService">
+            <summary>
+            Marker contract for a Serpium service component.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.ComponentInfo">
+            <summary>
+            Immutable metadata exposed by a Serpium component.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.ComponentState">
+            <summary>
+            Runtime state reported by a Serpium component.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.ComponentType">
+            <summary>
+            High-level category of a Serpium platform component.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.RelayGatewayEvent">
+            <summary>
+            UI-neutral progress message emitted by an IRelayGatewayEngine implementation.
+            </summary>
+        </member>
+        <member name="P:SerpiumVPN.Core.RelayGatewayEvent.Value">
+            <summary>
+            Optional machine-readable value, such as an authorization URL or virtual address.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.RelayGatewayEventKind">
+            <summary>
+            Kind of lifecycle notification emitted while a Relay gateway is starting or running.
+            </summary>
+        </member>
+        <member name="T:SerpiumVPN.Core.RelayGatewayStartResult">
+            <summary>
+            Result returned after a Relay gateway has become reachable on the virtual network.
+            </summary>
+        </member>
+    </members>
+</doc>

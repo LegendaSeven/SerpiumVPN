@@ -1,0 +1,8 @@
+{
+  "schemaVersion": 1,
+  "id": "serpium.sample",
+  "apiVersion": 1,
+  "assembly": "Serpium.SampleEngine.dll",
+  "entryType": "Serpium.SampleEngine.SampleEngine",
+  "enabled": true
+}

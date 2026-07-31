@@ -1,0 +1,13 @@
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Build\Serpium.SampleEngine.deps.json
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Build\Serpium.SampleEngine.dll
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Build\Serpium.SampleEngine.pdb
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.csproj.AssemblyReference.cache
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.GeneratedMSBuildEditorConfig.editorconfig
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.AssemblyInfoInputs.cache
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.AssemblyInfo.cs
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.csproj.CoreCompileInputs.cache
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.sourcelink.json
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.dll
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\refint\Serpium.SampleEngine.dll
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\Serpium.SampleEngine.pdb
+D:\Program\Serpium\SerpiumVPN\Engines\SampleEngine\Source\obj\Debug\ref\Serpium.SampleEngine.dll

@@ -40,6 +40,33 @@ function Write-Step {
     Write-Host "==> $Message" -ForegroundColor Cyan
 }
 
+
+function Stop-SerpiumRelayProcesses {
+    Write-Step "Stopping embedded Serpium Relay processes"
+
+    $relaySuffix = [System.IO.Path]::Combine("bin_files", "relay", "xray.exe")
+
+    Get-Process -Name "xray" -ErrorAction SilentlyContinue | ForEach-Object {
+        try {
+            $processPath = $_.Path
+            if ([string]::IsNullOrWhiteSpace($processPath)) {
+                return
+            }
+
+            if ($processPath.EndsWith(
+                    $relaySuffix,
+                    [System.StringComparison]::OrdinalIgnoreCase)) {
+                Stop-Process -Id $_.Id -Force -ErrorAction Stop
+                $_.WaitForExit()
+                Write-Host "Stopped embedded Xray PID $($_.Id): $processPath"
+            }
+        }
+        catch {
+            Write-Warning "Could not inspect or stop Xray PID $($_.Id): $($_.Exception.Message)"
+        }
+    }
+}
+
 function Assert-NativeSuccess {
     param([string]$CommandName)
 
@@ -62,6 +89,8 @@ if ($PublishGitHub) {
         throw "GitHub CLI was not found. Install it from https://cli.github.com/ and run: gh auth login"
     }
 }
+
+Stop-SerpiumRelayProcesses
 
 Write-Step "Cleaning release folders"
 foreach ($dir in @($PublishDir, $UpdaterPublishDir, $ReleaseDir, $InstallerDir)) {

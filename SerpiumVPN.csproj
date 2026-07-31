@@ -9,28 +9,68 @@
 		<UseWindowsForms>true</UseWindowsForms>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<ApplicationIcon>serpium_vpn.ico</ApplicationIcon>
-		<VersionPrefix>1.0.15</VersionPrefix>
-		<VersionSuffix>dev</VersionSuffix>
-		<AssemblyVersion>1.0.15.0</AssemblyVersion>
-		<FileVersion>1.0.15.0</FileVersion>
-		<InformationalVersion>1.0.15-dev</InformationalVersion>
+		<AssemblyVersion>1.0.38.0</AssemblyVersion>
+		<FileVersion>1.0.38.0</FileVersion>
+		<Version>1.0.38</Version>
+		<VersionPrefix>1.0.38</VersionPrefix>
+		<VersionSuffix></VersionSuffix>
+		<InformationalVersion>1.0.38</InformationalVersion>
+		<BuildSampleEngine Condition="'$(BuildSampleEngine)' == ''">true</BuildSampleEngine>
 	</PropertyGroup>
 
 	<ItemGroup>
-	  <None Remove="serpium_vpn.ico" />
-	  <Compile Remove="SerpiumUpdater\**\*.cs" />
-	  <None Remove="SerpiumUpdater\**\*" />
+		<None Remove="serpium_vpn.ico" />
+		<Compile Remove="SerpiumUpdater\**\*.cs" />
+		<None Remove="SerpiumUpdater\**\*" />
+		<Compile Remove="Engines\SampleEngine\Source\**\*.cs" />
+		<None Remove="Engines\SampleEngine\Source\**\*" />
+		<None Remove="Engines\SampleEngine\Build\**\*" />
+		<Compile Remove="SDK\**\*.cs" />
+		<EmbeddedResource Remove="SDK\**\*" />
+		<None Remove="SDK\**\*" />
 	</ItemGroup>
 
 	<ItemGroup>
-	  <Resource Include="serpium_vpn.ico" />
+		<Resource Include="serpium_vpn.ico" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="SDK\Serpium.Engine.Abstractions\Serpium.Engine.Abstractions.csproj" />
 	</ItemGroup>
 
 	<ItemGroup>
 		<None Update="bin_files\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
 		</None>
+		<None Update="Engines\**\*">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
 		<None Update=".github\workflows\release.yml" Link="GitHub Actions\release.yml" />
 	</ItemGroup>
+
+	<Target Name="BuildSampleEnginePackage"
+			AfterTargets="Build"
+			Condition="'$(BuildSampleEngine)' == 'true'">
+		<PropertyGroup>
+			<_SampleEngineProject>$(MSBuildProjectDirectory)\Engines\SampleEngine\Source\Serpium.SampleEngine.csproj</_SampleEngineProject>
+			<_SampleEngineOutput>$(MSBuildProjectDirectory)\Engines\SampleEngine\Build\</_SampleEngineOutput>
+			<_SampleEnginePackage>$(TargetDir)Engines\SampleEngine\</_SampleEnginePackage>
+		</PropertyGroup>
+
+		<MSBuild Projects="$(_SampleEngineProject)"
+				 Targets="Restore;Build"
+				 Properties="Configuration=$(Configuration)" />
+
+		<MakeDir Directories="$(_SampleEnginePackage)" />
+
+		<Copy SourceFiles="$(_SampleEngineOutput)Serpium.SampleEngine.dll"
+			  DestinationFolder="$(_SampleEnginePackage)"
+			  SkipUnchangedFiles="true" />
+
+		<Copy SourceFiles="$(MSBuildProjectDirectory)\Engines\SampleEngine\manifest.json"
+			  DestinationFolder="$(_SampleEnginePackage)"
+			  SkipUnchangedFiles="true" />
+	</Target>
 
 </Project>

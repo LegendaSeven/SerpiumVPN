@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "serpium.Serpium.Engine.Template",
+  "apiVersion": 1,
+  "version": "1.0.0",
+  "assembly": "Serpium.Engine.Template.dll",
+  "entryType": "Serpium.Engine.Template.Engine",
+  "enabled": true
+}

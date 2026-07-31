@@ -1,0 +1,42 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <OutputType>Library</OutputType>
+
+    <AssemblyName>Serpium.SerpiumNet.Engine</AssemblyName>
+    <RootNamespace>Serpium.SerpiumNet.Engine</RootNamespace>
+    <Version>0.4.3</Version>
+
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <GenerateDependencyFile>true</GenerateDependencyFile>
+
+    <SerpiumRoot Condition="'$(SerpiumRoot)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), SerpiumVPN.csproj))</SerpiumRoot>
+    <SerpiumSdkProject>$(SerpiumRoot)\SDK\Serpium.Engine.Abstractions\Serpium.Engine.Abstractions.csproj</SerpiumSdkProject>
+    <SerpiumNetExecutable>$(SerpiumRoot)\SerpiumNet\build\SerpiumNet.exe</SerpiumNetExecutable>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(SerpiumSdkProject)')">
+    <ProjectReference Include="$(SerpiumSdkProject)">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <ItemGroup Condition="Exists('$(SerpiumNetExecutable)')">
+    <None Include="$(SerpiumNetExecutable)"
+          Link="SerpiumNet.exe"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <Target Name="ValidateSerpiumDependencies" BeforeTargets="ResolveReferences">
+    <Error Condition="!Exists('$(SerpiumSdkProject)')"
+           Text="Serpium Engine SDK was not found. Build inside the SerpiumVPN repository or pass -p:SerpiumRoot=&quot;D:\Path\To\SerpiumVPN&quot;." />
+    <Error Condition="!Exists('$(SerpiumNetExecutable)')"
+           Text="SerpiumNet.exe was not found at '$(SerpiumNetExecutable)'. Build the Go executable before packaging the engine." />
+  </Target>
+
+</Project>

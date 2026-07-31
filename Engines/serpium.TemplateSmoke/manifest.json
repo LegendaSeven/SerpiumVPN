@@ -1,0 +1,9 @@
+{
+  "schemaVersion": 1,
+  "id": "serpium.TemplateSmoke",
+  "apiVersion": 1,
+  "version": "1.0.0",
+  "assembly": "Runtime/TemplateSmoke.dll",
+  "entryType": "TemplateSmoke.Engine",
+  "enabled": true
+}

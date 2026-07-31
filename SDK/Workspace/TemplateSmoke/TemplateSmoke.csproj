@@ -1,0 +1,32 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <OutputType>Library</OutputType>
+
+    <AssemblyName>TemplateSmoke</AssemblyName>
+    <RootNamespace>TemplateSmoke</RootNamespace>
+    <Version>1.0.0</Version>
+
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+    <GenerateDependencyFile>true</GenerateDependencyFile>
+
+    <SerpiumRoot Condition="'$(SerpiumRoot)' == ''">$([MSBuild]::GetDirectoryNameOfFileAbove($(MSBuildProjectDirectory), SerpiumVPN.csproj))</SerpiumRoot>
+    <SerpiumSdkProject>$(SerpiumRoot)\SDK\Serpium.Engine.Abstractions\Serpium.Engine.Abstractions.csproj</SerpiumSdkProject>
+  </PropertyGroup>
+
+  <ItemGroup Condition="Exists('$(SerpiumSdkProject)')">
+    <ProjectReference Include="$(SerpiumSdkProject)">
+      <Private>false</Private>
+    </ProjectReference>
+  </ItemGroup>
+
+  <Target Name="ValidateSerpiumSdk" BeforeTargets="ResolveReferences"
+          Condition="!Exists('$(SerpiumSdkProject)')">
+    <Error Text="Serpium Engine SDK was not found. Generate this project inside the SerpiumVPN repository or build with -p:SerpiumRoot=&quot;D:\Path\To\SerpiumVPN&quot;." />
+  </Target>
+
+</Project>
