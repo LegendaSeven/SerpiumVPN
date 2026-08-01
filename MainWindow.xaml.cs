@@ -23,6 +23,7 @@ using WpfBrushes = System.Windows.Media.Brushes;
 using Clipboard = System.Windows.Clipboard;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using SerpiumVPN.Relay;
+using SerpiumVPN.Relay.Lifecycle;
 using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Providers.Avo;
@@ -42,6 +43,7 @@ namespace SerpiumVPN
         private readonly VendorUpdateManager _vendorUpdateManager;
         private readonly AppUpdateManager _appUpdateManager;
         private readonly DispatcherTimer _strategyMonitorTimer;
+        private readonly DispatcherTimer _relayLifecycleTimer;
         private readonly UserRuntimeSettings _settings;
         private Forms.NotifyIcon? _trayIcon;
         private CancellationTokenSource? _strategySelectionCts;
@@ -68,6 +70,10 @@ namespace SerpiumVPN
         private Guid? _activeSavedProfileId;
         private int? _activeSavedProfileSocksPort;
         private bool _savedProfileOperationInProgress;
+        private bool _relayLifecycleCheckInProgress;
+        private Guid? _failedSavedProfileId;
+        private string? _failedSavedProfileMessage;
+        private DateTimeOffset _savedProfileInputBlockedUntil;
         private string? _relayGatewayUuid;
 
         public static Action<string>? LocalUpdateRequested;
@@ -110,6 +116,11 @@ namespace SerpiumVPN
                 Interval = TimeSpan.FromMinutes(2)
             };
             _strategyMonitorTimer.Tick += StrategyMonitorTimer_TickAsync;
+            _relayLifecycleTimer = new DispatcherTimer
+            {
+                Interval = TimeSpan.FromSeconds(2)
+            };
+            _relayLifecycleTimer.Tick += RelayLifecycleTimer_TickAsync;
 
             this.Closing += MainWindow_Closing;
             this.StateChanged += MainWindow_StateChanged;
@@ -168,7 +179,16 @@ namespace SerpiumVPN
 
         private async void MainWindow_LoadedAsync(object sender, RoutedEventArgs e)
         {
+            bool recoveredPreviousSession = await RecoverRelayLifecycleAtStartupAsync();
             await RefreshSecureProfileVaultStatusAsync();
+            _relayLifecycleTimer.Start();
+
+            if (recoveredPreviousSession)
+            {
+                SetRelayStatus(
+                    "Статус: предыдущая незавершённая VPN-сессия очищена; профили готовы.",
+                    WpfBrushes.Goldenrod);
+            }
 
             if (_settings.AutoUpdateFiles)
                 await CheckVendorUpdatesAsync(showSuccessMessage: false);
@@ -911,16 +931,42 @@ namespace SerpiumVPN
             }
 
             StopStrategyMonitor();
+            _relayLifecycleTimer.Stop();
             _zapretManager.Stop();
             _telegramProxyManager.Stop();
             DisposeValidatedProviderRuntimeProfile();
             try
             {
-                _serpiumSingBoxSessionManager.StopAsync().GetAwaiter().GetResult();
+                if (_serpiumSingBoxSessionManager.HasLiveProcess ||
+                    _serpiumSingBoxSessionManager.State != RelayGatewayState.Stopped)
+                {
+                    _serpiumSingBoxSessionManager.StopAsync().GetAwaiter().GetResult();
+                }
             }
             catch
             {
                 // Kill-On-Close Job Object remains the final safety net.
+            }
+            try
+            {
+                if (_serpiumXraySessionManager.HasLiveProcess ||
+                    _serpiumXraySessionManager.State != RelayGatewayState.Stopped)
+                {
+                    _serpiumXraySessionManager.StopAsync().GetAwaiter().GetResult();
+                }
+            }
+            catch
+            {
+                // The owned-process cleanup below remains the final safety net.
+            }
+            try
+            {
+                RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(
+                    AppContext.BaseDirectory).GetAwaiter().GetResult();
+            }
+            catch
+            {
+                // Best effort during final application shutdown.
             }
             try { _serpiumSingBoxSessionManager.Dispose(); } catch { }
             try { _serpiumXraySessionManager.Dispose(); } catch { }
@@ -1375,6 +1421,7 @@ namespace SerpiumVPN
                             item => item.ToUpperInvariant()))
                         : "AVO";
                     _activeSavedProfileId = null;
+                    ClearSavedProfileFailure();
                     _currentProviderProfileSaved = false;
                     ButtonSaveRelayProfile.Content = "Сохранить профиль";
                     SetRelayStatus(
@@ -1414,6 +1461,7 @@ namespace SerpiumVPN
 
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = socksPort;
+                ClearSavedProfileFailure();
                 _currentProviderProfileSaved = false;
                 ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = $"SOCKS5: активен (127.0.0.1:{socksPort})";
@@ -1479,10 +1527,12 @@ namespace SerpiumVPN
                 DisposeValidatedProviderRuntimeProfile();
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
+                ClearSavedProfileFailure();
                 _currentProviderProfileSaved = false;
                 ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
+                RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 UpdateRelayClientUi();
                 await RefreshSecureProfileVaultStatusAsync();
 
@@ -1508,20 +1558,6 @@ namespace SerpiumVPN
                                _serpiumXraySessionManager.HasLiveProcess;
             bool singBoxRunning = singBoxState == RelayGatewayState.Running ||
                                   _serpiumSingBoxSessionManager.HasLiveProcess;
-            if (_activeSavedProfileId.HasValue &&
-                !singBoxRunning &&
-                !xrayRunning &&
-                !_savedProfileOperationInProgress &&
-                singBoxState is RelayGatewayState.Stopped or RelayGatewayState.Failed &&
-                xrayState is RelayGatewayState.Stopped or RelayGatewayState.Failed)
-            {
-                _activeSavedProfileId = null;
-                _activeSavedProfileSocksPort = null;
-                _currentProviderProfileSaved = false;
-                _validatedRelayProfile = null;
-                DisposeValidatedProviderRuntimeProfile();
-            }
-
             bool isBusy = xrayBusy || singBoxBusy;
             bool isRunning = xrayRunning || singBoxRunning;
             bool providerMode =
@@ -1817,6 +1853,7 @@ namespace SerpiumVPN
             foreach (SecureProfileVaultEntry entry in profiles)
             {
                 bool isActive = hasActiveProfile && _activeSavedProfileId == entry.Id;
+                bool isFailed = !isActive && _failedSavedProfileId == entry.Id;
                 bool blockedByAnother = hasActiveProfile && !isActive;
 
                 System.Windows.Controls.Border card = new()
@@ -1824,7 +1861,9 @@ namespace SerpiumVPN
                     Background = new SolidColorBrush(Color.FromRgb(0x11, 0x11, 0x18)),
                     BorderBrush = isActive
                         ? new SolidColorBrush(Color.FromRgb(0x33, 0xD1, 0x7A))
-                        : new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x3A)),
+                        : isFailed
+                            ? new SolidColorBrush(Color.FromRgb(0xFF, 0x8A, 0x3D))
+                            : new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x3A)),
                     BorderThickness = new Thickness(isActive ? 1.5 : 1),
                     CornerRadius = new CornerRadius(9),
                     Padding = new Thickness(14, 12, 12, 12),
@@ -1874,8 +1913,14 @@ namespace SerpiumVPN
                             : $"Подключён · TUN {_serpiumSingBoxSessionManager.InterfaceName ?? "Serpium"}"
                         : blockedByAnother
                             ? "Недоступен, пока активен другой профиль"
-                            : "Готов к подключению",
-                    Foreground = isActive ? WpfBrushes.LightGreen : WpfBrushes.Gray,
+                            : isFailed
+                                ? "Ошибка · " + (_failedSavedProfileMessage ?? "движок остановлен")
+                                : "Готов к подключению",
+                    Foreground = isActive
+                        ? WpfBrushes.LightGreen
+                        : isFailed
+                            ? WpfBrushes.OrangeRed
+                            : WpfBrushes.Gray,
                     Margin = new Thickness(0, 5, 0, 0),
                     FontSize = 12
                 });
@@ -1922,10 +1967,13 @@ namespace SerpiumVPN
         {
             if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle ||
                 toggle.Tag is not Guid profileId ||
-                _savedProfileOperationInProgress)
+                _savedProfileOperationInProgress ||
+                DateTimeOffset.UtcNow < _savedProfileInputBlockedUntil)
             {
                 return;
             }
+
+            _savedProfileInputBlockedUntil = DateTimeOffset.UtcNow.AddMilliseconds(900);
 
             bool anySavedEngineRunning =
                 _serpiumSingBoxSessionManager.State == RelayGatewayState.Running ||
@@ -1955,6 +2003,8 @@ namespace SerpiumVPN
             }
 
             _savedProfileOperationInProgress = true;
+            if (_failedSavedProfileId == profileId)
+                ClearSavedProfileFailure();
             RenderSavedProfileCards(_savedProfileEntries);
             try
             {
@@ -1985,6 +2035,7 @@ namespace SerpiumVPN
                         savedXray.SocksPort);
 
                     _activeSavedProfileId = profileId;
+                    ClearSavedProfileFailure();
                     _currentProviderProfileSaved = true;
                     RelayDetectedProfileTextBlock.Text =
                         BuildRelayProfileSummary(savedXray.Profile) +
@@ -2019,6 +2070,7 @@ namespace SerpiumVPN
                         _validatedProviderRuntimeProfile);
 
                     _activeSavedProfileId = profileId;
+                    ClearSavedProfileFailure();
                     _currentProviderProfileSaved = true;
                     RelayDetectedProfileTextBlock.Text =
                         BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile) +
@@ -2039,11 +2091,14 @@ namespace SerpiumVPN
             }
             catch (Exception ex)
             {
+                _failedSavedProfileId = profileId;
+                _failedSavedProfileMessage = NormalizeLifecycleError(ex.Message);
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
                 _currentProviderProfileSaved = false;
                 _validatedRelayProfile = null;
                 DisposeValidatedProviderRuntimeProfile();
+                RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 SetRelayStatus(
                     "Статус: сохранённый профиль не подключён — " + ex.Message,
                     WpfBrushes.OrangeRed);
@@ -2063,11 +2118,13 @@ namespace SerpiumVPN
             if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle ||
                 toggle.Tag is not Guid profileId ||
                 _activeSavedProfileId != profileId ||
-                _savedProfileOperationInProgress)
+                _savedProfileOperationInProgress ||
+                DateTimeOffset.UtcNow < _savedProfileInputBlockedUntil)
             {
                 return;
             }
 
+            _savedProfileInputBlockedUntil = DateTimeOffset.UtcNow.AddMilliseconds(900);
             _savedProfileOperationInProgress = true;
             RenderSavedProfileCards(_savedProfileEntries);
             try
@@ -2131,9 +2188,11 @@ namespace SerpiumVPN
             {
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
+                ClearSavedProfileFailure();
                 _currentProviderProfileSaved = false;
                 _validatedRelayProfile = null;
                 DisposeValidatedProviderRuntimeProfile();
+                RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
@@ -2154,16 +2213,16 @@ namespace SerpiumVPN
                 return;
             }
 
-            MessageBoxResult answer = MessageBox.Show(
-                this,
-                "Вы действительно хотите удалить этот профиль?" +
-                Environment.NewLine + Environment.NewLine +
-                "Все сохранённые данные этого профиля будут удалены из Serpium.",
-                "Удаление профиля",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning,
-                MessageBoxResult.No);
-            if (answer != MessageBoxResult.Yes)
+            SecureProfileVaultEntry? profileEntry = _savedProfileEntries
+                .FirstOrDefault(entry => entry.Id == profileId);
+
+            ProfileDeleteConfirmDialog confirmationDialog = new(
+                profileEntry?.SafeDisplayName ?? "Выбранный профиль")
+            {
+                Owner = this
+            };
+
+            if (confirmationDialog.ShowDialog() != true)
                 return;
 
             _savedProfileOperationInProgress = true;
@@ -2174,6 +2233,8 @@ namespace SerpiumVPN
                     await StopActiveSavedProfileAsync();
 
                 bool deleted = await _secureProfileVault.DeleteProfileAsync(profileId);
+                if (_failedSavedProfileId == profileId)
+                    ClearSavedProfileFailure();
                 SetRelayStatus(
                     deleted
                         ? "Статус: профиль и его сохранённые данные удалены."
@@ -2193,6 +2254,247 @@ namespace SerpiumVPN
                 await RefreshSecureProfileVaultStatusAsync();
             }
         }
+
+        private async Task<bool> RecoverRelayLifecycleAtStartupAsync()
+        {
+            _activeSavedProfileId = null;
+            _activeSavedProfileSocksPort = null;
+            ClearSavedProfileFailure();
+
+            bool managerReportedRuntime =
+                _serpiumSingBoxSessionManager.HasLiveProcess ||
+                _serpiumXraySessionManager.HasLiveProcess;
+
+            if (managerReportedRuntime)
+            {
+                SetRelayStatus(
+                    "Статус: очищаем незавершённую предыдущую VPN-сессию…",
+                    WpfBrushes.Goldenrod);
+            }
+
+            try
+            {
+                if (_serpiumSingBoxSessionManager.HasLiveProcess)
+                {
+                    try
+                    {
+                        await _serpiumSingBoxSessionManager.StopAsync();
+                    }
+                    catch
+                    {
+                        // The owned-process sweep below is the fallback.
+                    }
+                }
+
+                if (_serpiumXraySessionManager.HasLiveProcess)
+                {
+                    try
+                    {
+                        await _serpiumXraySessionManager.StopAsync();
+                    }
+                    catch
+                    {
+                        // The owned-process sweep below is the fallback.
+                    }
+                }
+
+                RelayLifecycleCleanupResult cleanup =
+                    await RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(
+                        AppContext.BaseDirectory);
+
+                return managerReportedRuntime ||
+                       cleanup.ProcessesStopped > 0 ||
+                       cleanup.FilesDeleted > 0;
+            }
+            finally
+            {
+                _validatedRelayProfile = null;
+                DisposeValidatedProviderRuntimeProfile();
+                _currentProviderProfileSaved = false;
+                RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
+                RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
+                UpdateRelayClientUi();
+            }
+        }
+
+        private async void RelayLifecycleTimer_TickAsync(
+            object? sender,
+            EventArgs e)
+        {
+            if (_relayLifecycleCheckInProgress ||
+                _savedProfileOperationInProgress ||
+                !_activeSavedProfileId.HasValue ||
+                _isRealExit)
+            {
+                return;
+            }
+
+            _relayLifecycleCheckInProgress = true;
+            try
+            {
+                Guid profileId = _activeSavedProfileId.Value;
+                SecureProfileVaultEntry? entry =
+                    _savedProfileEntries.FirstOrDefault(item => item.Id == profileId);
+                if (entry is null)
+                {
+                    await MarkSavedProfileRuntimeFailedAsync(
+                        profileId,
+                        "профиль удалён или недоступен");
+                    return;
+                }
+
+                bool xrayLive = _serpiumXraySessionManager.HasLiveProcess;
+                bool singBoxLive = _serpiumSingBoxSessionManager.HasLiveProcess;
+                bool expectsXray =
+                    string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase);
+
+                if (xrayLive && singBoxLive)
+                {
+                    await StopAllRelayTransportsBestEffortAsync();
+                    await MarkSavedProfileRuntimeFailedAsync(
+                        profileId,
+                        "обнаружены два одновременно запущенных транспорта");
+                    return;
+                }
+
+                RelayGatewayState expectedState = expectsXray
+                    ? _serpiumXraySessionManager.State
+                    : _serpiumSingBoxSessionManager.State;
+                bool expectedLive = expectsXray ? xrayLive : singBoxLive;
+                bool unexpectedLive = expectsXray ? singBoxLive : xrayLive;
+
+                if (unexpectedLive)
+                {
+                    await StopAllRelayTransportsBestEffortAsync();
+                    await MarkSavedProfileRuntimeFailedAsync(
+                        profileId,
+                        "запущен транспорт другого профиля");
+                    return;
+                }
+
+                if (expectedState == RelayGatewayState.Failed)
+                {
+                    if (expectedLive)
+                        await StopAllRelayTransportsBestEffortAsync();
+
+                    string failedReason = expectsXray
+                        ? _serpiumXraySessionManager.LastError ??
+                          "Xray завершился с ошибкой"
+                        : _serpiumSingBoxSessionManager.LastError ??
+                          "sing-box завершился с ошибкой";
+
+                    await MarkSavedProfileRuntimeFailedAsync(
+                        profileId,
+                        failedReason);
+                    return;
+                }
+
+                if (!expectedLive &&
+                    expectedState != RelayGatewayState.Starting &&
+                    expectedState != RelayGatewayState.Stopping)
+                {
+                    string reason = expectsXray
+                        ? _serpiumXraySessionManager.LastError ??
+                          "Xray неожиданно завершился"
+                        : _serpiumSingBoxSessionManager.LastError ??
+                          "sing-box неожиданно завершился";
+
+                    await MarkSavedProfileRuntimeFailedAsync(profileId, reason);
+                }
+            }
+            catch (Exception ex)
+            {
+                SetRelayStatus(
+                    "Статус: проверка состояния VPN завершилась ошибкой — " +
+                    NormalizeLifecycleError(ex.Message),
+                    WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _relayLifecycleCheckInProgress = false;
+            }
+        }
+
+        private async Task StopAllRelayTransportsBestEffortAsync()
+        {
+            try
+            {
+                if (_serpiumSingBoxSessionManager.HasLiveProcess ||
+                    _serpiumSingBoxSessionManager.State != RelayGatewayState.Stopped)
+                {
+                    await _serpiumSingBoxSessionManager.StopAsync();
+                }
+            }
+            catch
+            {
+                // Continue with the second manager and process sweep.
+            }
+
+            try
+            {
+                if (_serpiumXraySessionManager.HasLiveProcess ||
+                    _serpiumXraySessionManager.State != RelayGatewayState.Stopped)
+                {
+                    await _serpiumXraySessionManager.StopAsync();
+                }
+            }
+            catch
+            {
+                // The process sweep below is the final fallback.
+            }
+
+            await RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(
+                AppContext.BaseDirectory);
+        }
+
+        private async Task MarkSavedProfileRuntimeFailedAsync(
+            Guid profileId,
+            string reason)
+        {
+            _failedSavedProfileId = profileId;
+            _failedSavedProfileMessage = NormalizeLifecycleError(reason);
+            _activeSavedProfileId = null;
+            _activeSavedProfileSocksPort = null;
+            _currentProviderProfileSaved = false;
+            _validatedRelayProfile = null;
+            DisposeValidatedProviderRuntimeProfile();
+            RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
+
+            RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
+            RelayClientSocksStateTextBlock.Foreground = WpfBrushes.OrangeRed;
+            SetRelayStatus(
+                "Статус: активный профиль аварийно остановлен — " +
+                _failedSavedProfileMessage,
+                WpfBrushes.OrangeRed);
+
+            UpdateRelayClientUi();
+            await RefreshSecureProfileVaultStatusAsync();
+        }
+
+        private void ClearSavedProfileFailure()
+        {
+            _failedSavedProfileId = null;
+            _failedSavedProfileMessage = null;
+        }
+
+        private static string NormalizeLifecycleError(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return "движок неожиданно завершился";
+
+            string normalized = value
+                .Replace('\r', ' ')
+                .Replace('\n', ' ')
+                .Trim();
+
+            while (normalized.Contains("  ", StringComparison.Ordinal))
+                normalized = normalized.Replace("  ", " ", StringComparison.Ordinal);
+
+            return normalized.Length <= 120
+                ? normalized
+                : normalized[..117] + "…";
+        }
+
         private async void ValidateRelayKey_Click(object sender, RoutedEventArgs e)
         {
             ButtonValidateRelayKey.IsEnabled = false;
