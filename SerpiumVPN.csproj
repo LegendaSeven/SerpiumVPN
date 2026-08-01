@@ -9,12 +9,12 @@
 		<UseWindowsForms>true</UseWindowsForms>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<ApplicationIcon>serpium_vpn.ico</ApplicationIcon>
-		<AssemblyVersion>1.0.41.0</AssemblyVersion>
-		<FileVersion>1.0.41.0</FileVersion>
-		<Version>1.0.41</Version>
-		<VersionPrefix>1.0.41</VersionPrefix>
+		<AssemblyVersion>1.0.43.0</AssemblyVersion>
+		<FileVersion>1.0.43.0</FileVersion>
+		<Version>1.0.43</Version>
+		<VersionPrefix>1.0.43</VersionPrefix>
 		<VersionSuffix></VersionSuffix>
-		<InformationalVersion>1.0.41</InformationalVersion>
+		<InformationalVersion>1.0.43</InformationalVersion>
 		<BuildSampleEngine Condition="'$(BuildSampleEngine)' == ''">true</BuildSampleEngine>
 	</PropertyGroup>
 

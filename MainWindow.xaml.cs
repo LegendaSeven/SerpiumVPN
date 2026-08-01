@@ -55,6 +55,7 @@ namespace SerpiumVPN
         private readonly ProviderEnvelopeAdapterRegistry _providerEnvelopeAdapters = new();
         private readonly SerpiumKeyValidationService _serpiumKeyValidationService = new();
         private readonly SerpiumSingBoxValidationService _singBoxValidationService = new();
+        private readonly SerpiumSingBoxSessionManager _serpiumSingBoxSessionManager = new();
         private readonly SerpiumXraySessionManager _serpiumXraySessionManager = new();
         private SerpiumConnectionProfile? _validatedRelayProfile;
         private ProviderRuntimeProfile? _validatedProviderRuntimeProfile;
@@ -81,9 +82,16 @@ namespace SerpiumVPN
                 RelayGatewayLogTextBox.AppendText(line + Environment.NewLine);
                 RelayGatewayLogTextBox.ScrollToEnd();
             });
-            _serpiumXraySessionManager.StateChanged += state =>
-                SafeDispatcherInvoke(() => UpdateRelayClientUi(state));
+            _serpiumXraySessionManager.StateChanged += _ =>
+                SafeDispatcherInvoke(UpdateRelayClientUi);
             _serpiumXraySessionManager.LogReceived += line => SafeDispatcherInvoke(() =>
+            {
+                RelayClientLogTextBox.AppendText(line + Environment.NewLine);
+                RelayClientLogTextBox.ScrollToEnd();
+            });
+            _serpiumSingBoxSessionManager.StateChanged += _ =>
+                SafeDispatcherInvoke(UpdateRelayClientUi);
+            _serpiumSingBoxSessionManager.LogReceived += line => SafeDispatcherInvoke(() =>
             {
                 RelayClientLogTextBox.AppendText(line + Environment.NewLine);
                 RelayClientLogTextBox.ScrollToEnd();
@@ -895,6 +903,15 @@ namespace SerpiumVPN
             _zapretManager.Stop();
             _telegramProxyManager.Stop();
             DisposeValidatedProviderRuntimeProfile();
+            try
+            {
+                _serpiumSingBoxSessionManager.StopAsync().GetAwaiter().GetResult();
+            }
+            catch
+            {
+                // Kill-On-Close Job Object remains the final safety net.
+            }
+            try { _serpiumSingBoxSessionManager.Dispose(); } catch { }
             try { _serpiumXraySessionManager.Dispose(); } catch { }
             try { _xrayClientManager.Dispose(); } catch { }
             try { _xrayGatewayManager.Dispose(); } catch { }
@@ -1253,6 +1270,13 @@ namespace SerpiumVPN
         {
             try
             {
+                if (_serpiumXraySessionManager.HasLiveProcess ||
+                    _serpiumSingBoxSessionManager.HasLiveProcess)
+                {
+                    throw new InvalidOperationException(
+                        "Подключение уже запущено. Сначала нажмите «Отключиться».");
+                }
+
                 SerpiumParseResult parseResult = _serpiumParser.Parse(RelayClientKeyTextBox.Text);
                 if (!parseResult.Success)
                     throw new FormatException(parseResult.Error);
@@ -1319,9 +1343,29 @@ namespace SerpiumVPN
                         "• " + engineCheck.EngineVersion + Environment.NewLine +
                         "• " + engineCheck.Message;
 
+                    RelayClientLogTextBox.Clear();
                     SetRelayStatus(
-                        "Статус: AVO-профиль принят sing-box. Реальный запуск TUN будет включён в MVP7.0A.6.",
-                        WpfBrushes.Goldenrod);
+                        "Статус: конфигурация принята — запускаем защищённый TUN sing-box…",
+                        WpfBrushes.DeepSkyBlue);
+                    RelayClientSocksStateTextBlock.Text = "TUN: запускается…";
+                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.DeepSkyBlue;
+
+                    await _serpiumSingBoxSessionManager.StartAsync(
+                        IOPath.Combine(singBoxRelayDir, "sing-box.exe"),
+                        candidateProfile);
+
+                    string activeInterface =
+                        _serpiumSingBoxSessionManager.InterfaceName ?? "Serpium TUN";
+                    RelayClientSocksStateTextBlock.Text = $"TUN: активен ({activeInterface})";
+                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
+
+                    string protocols = candidateProfile.Protocols.Count > 0
+                        ? string.Join(", ", candidateProfile.Protocols.Select(
+                            item => item.ToUpperInvariant()))
+                        : "AVO";
+                    SetRelayStatus(
+                        $"Статус: подключено через AVO — {protocols}; TUN {activeInterface}.",
+                        WpfBrushes.LightGreen);
                     return;
                 }
 
@@ -1365,19 +1409,62 @@ namespace SerpiumVPN
                 RelayClientSocksStateTextBlock.Text = "SOCKS5: остановлен";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
                 SetRelayStatus("Статус: ошибка подключения — " + ex.Message, WpfBrushes.OrangeRed);
-                UpdateRelayClientUi(_serpiumXraySessionManager.State);
+                UpdateRelayClientUi();
             }
         }
 
         private async void StopRelayClient_ClickAsync(object sender, RoutedEventArgs e)
         {
+            Exception? stopError = null;
             try
             {
                 SetRelayStatus("Статус: отключение…", WpfBrushes.Goldenrod);
-                await _serpiumXraySessionManager.StopAsync();
-                RelayClientSocksStateTextBlock.Text = "SOCKS5: остановлен";
+
+                bool stopSingBox =
+                    _serpiumSingBoxSessionManager.HasLiveProcess ||
+                    _serpiumSingBoxSessionManager.State is RelayGatewayState.Starting or
+                        RelayGatewayState.Running or RelayGatewayState.Stopping or
+                        RelayGatewayState.Failed;
+                bool stopXray =
+                    _serpiumXraySessionManager.HasLiveProcess ||
+                    _serpiumXraySessionManager.State is RelayGatewayState.Starting or
+                        RelayGatewayState.Running or RelayGatewayState.Stopping or
+                        RelayGatewayState.Failed;
+
+                if (stopSingBox)
+                {
+                    try
+                    {
+                        await _serpiumSingBoxSessionManager.StopAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        stopError ??= ex;
+                    }
+                }
+
+                if (stopXray)
+                {
+                    try
+                    {
+                        await _serpiumXraySessionManager.StopAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        stopError ??= ex;
+                    }
+                }
+
+                _validatedRelayProfile = null;
+                DisposeValidatedProviderRuntimeProfile();
+                RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
-                SetRelayStatus("Статус: отключено.", WpfBrushes.Gray);
+                UpdateRelayClientUi();
+
+                if (stopError is not null)
+                    throw stopError;
+
+                SetRelayStatus("Статус: отключено; TUN и маршруты освобождены.", WpfBrushes.Gray);
             }
             catch (Exception ex)
             {
@@ -1385,27 +1472,52 @@ namespace SerpiumVPN
             }
         }
 
-        private void UpdateRelayClientUi(RelayGatewayState state)
+        private void UpdateRelayClientUi()
         {
-            bool isBusy = state is RelayGatewayState.Starting or RelayGatewayState.Stopping;
-            bool isRunning = state == RelayGatewayState.Running ||
-                             _serpiumXraySessionManager.HasLiveProcess;
+            RelayGatewayState xrayState = _serpiumXraySessionManager.State;
+            RelayGatewayState singBoxState = _serpiumSingBoxSessionManager.State;
+
+            bool xrayBusy = xrayState is RelayGatewayState.Starting or RelayGatewayState.Stopping;
+            bool singBoxBusy = singBoxState is RelayGatewayState.Starting or RelayGatewayState.Stopping;
+            bool xrayRunning = xrayState == RelayGatewayState.Running ||
+                               _serpiumXraySessionManager.HasLiveProcess;
+            bool singBoxRunning = singBoxState == RelayGatewayState.Running ||
+                                  _serpiumSingBoxSessionManager.HasLiveProcess;
+            bool isBusy = xrayBusy || singBoxBusy;
+            bool isRunning = xrayRunning || singBoxRunning;
+            bool providerMode =
+                _validatedProviderRuntimeProfile is not null ||
+                singBoxState != RelayGatewayState.Stopped ||
+                singBoxRunning;
 
             ButtonStartRelayClient.IsEnabled = !isBusy && !isRunning;
-            ButtonStopRelayClient.IsEnabled = isBusy || isRunning;
+            ButtonStopRelayClient.IsEnabled = isBusy || isRunning ||
+                xrayState == RelayGatewayState.Failed ||
+                singBoxState == RelayGatewayState.Failed;
             ButtonValidateRelayKey.IsEnabled = !isBusy && !isRunning;
             RelayClientKeyTextBox.IsReadOnly = isBusy || isRunning;
+            RelayClientSocksPortTextBox.IsEnabled = !providerMode && !isBusy && !isRunning;
 
-            RelayClientStateTextBlock.Text = state switch
-            {
-                RelayGatewayState.Starting => "Xray: запускается…",
-                RelayGatewayState.Running => "Xray: работает",
-                RelayGatewayState.Stopping => "Xray: останавливается…",
-                RelayGatewayState.Failed => "Xray: ошибка",
-                _ => "Xray: остановлен"
-            };
+            RelayGatewayState visibleState = providerMode ? singBoxState : xrayState;
+            RelayClientStateTextBlock.Text = providerMode
+                ? visibleState switch
+                {
+                    RelayGatewayState.Starting => "sing-box: запускается…",
+                    RelayGatewayState.Running => "sing-box: работает",
+                    RelayGatewayState.Stopping => "sing-box: останавливается…",
+                    RelayGatewayState.Failed => "sing-box: ошибка",
+                    _ => "sing-box: остановлен"
+                }
+                : visibleState switch
+                {
+                    RelayGatewayState.Starting => "Xray: запускается…",
+                    RelayGatewayState.Running => "Xray: работает",
+                    RelayGatewayState.Stopping => "Xray: останавливается…",
+                    RelayGatewayState.Failed => "Xray: ошибка",
+                    _ => "Xray: остановлен"
+                };
 
-            RelayClientStateTextBlock.Foreground = state switch
+            RelayClientStateTextBlock.Foreground = visibleState switch
             {
                 RelayGatewayState.Running => WpfBrushes.LightGreen,
                 RelayGatewayState.Failed => WpfBrushes.OrangeRed,
@@ -1414,11 +1526,42 @@ namespace SerpiumVPN
                 _ => WpfBrushes.Gray
             };
 
-            if (state == RelayGatewayState.Failed &&
-                !string.IsNullOrWhiteSpace(_serpiumXraySessionManager.LastError))
+            if (providerMode)
+            {
+                RelayClientSocksStateTextBlock.Text = visibleState switch
+                {
+                    RelayGatewayState.Starting => "TUN: запускается…",
+                    RelayGatewayState.Running =>
+                        $"TUN: активен ({_serpiumSingBoxSessionManager.InterfaceName ?? "Serpium"})",
+                    RelayGatewayState.Stopping => "TUN: освобождает маршруты…",
+                    _ => "TUN: остановлен"
+                };
+            }
+            else if (!xrayRunning)
             {
                 RelayClientSocksStateTextBlock.Text = "SOCKS5: остановлен";
-                RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
+            }
+
+            RelayClientSocksStateTextBlock.Foreground = visibleState switch
+            {
+                RelayGatewayState.Running => WpfBrushes.LightGreen,
+                RelayGatewayState.Failed => WpfBrushes.OrangeRed,
+                RelayGatewayState.Starting => WpfBrushes.DeepSkyBlue,
+                RelayGatewayState.Stopping => WpfBrushes.Goldenrod,
+                _ => WpfBrushes.Gray
+            };
+
+            if (singBoxState == RelayGatewayState.Failed &&
+                !string.IsNullOrWhiteSpace(_serpiumSingBoxSessionManager.LastError))
+            {
+                SetRelayStatus(
+                    "Статус: TUN-соединение завершилось с ошибкой — " +
+                    _serpiumSingBoxSessionManager.LastError,
+                    WpfBrushes.OrangeRed);
+            }
+            else if (xrayState == RelayGatewayState.Failed &&
+                     !string.IsNullOrWhiteSpace(_serpiumXraySessionManager.LastError))
+            {
                 SetRelayStatus(
                     "Статус: соединение завершилось с ошибкой — " +
                     _serpiumXraySessionManager.LastError,
@@ -1606,10 +1749,7 @@ namespace SerpiumVPN
             }
             finally
             {
-                ButtonValidateRelayKey.IsEnabled =
-                    !_serpiumXraySessionManager.HasLiveProcess &&
-                    _serpiumXraySessionManager.State is not RelayGatewayState.Starting and
-                    not RelayGatewayState.Stopping;
+                UpdateRelayClientUi();
             }
         }
 
@@ -1623,6 +1763,7 @@ namespace SerpiumVPN
             RelayDetectedProfileTextBlock.Text = string.IsNullOrWhiteSpace(RelayClientKeyTextBox.Text)
                 ? "Формат ещё не определён."
                 : "Ключ изменён — требуется повторная проверка.";
+            UpdateRelayClientUi();
         }
 
         private void DisposeValidatedProviderRuntimeProfile()

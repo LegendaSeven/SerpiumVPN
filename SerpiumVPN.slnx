@@ -1,4 +1,5 @@
-<Solution>
+﻿<Solution>
   <Project Path="SerpiumVPN.csproj" />
+  <Project Path="SDK\Serpium.Engine.Abstractions\Serpium.Engine.Abstractions.csproj" />
   <Project Path="SerpiumUpdater\SerpiumUpdater.csproj" />
 </Solution>

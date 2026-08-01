@@ -1,33 +1,83 @@
-# Build outputs
-/bin/
-/obj/
-/publish/
+﻿# Build outputs
+/bin/
+/obj/
+/publish/
+
+# Visual Studio state
+/.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Local runtime data
+/bin_files/logs/
+/bin_files/tgws/TgWsProxy_data/
+/bin_files/tgws/telegram_proxy_link.txt
+
+# Publish profile user state
+/Properties/PublishProfiles/*.pubxml.user
+
+# Packages and archives
+*.nupkg
+*.snupkg
+*.zip
+*.7z
+*.rar
+
+# Logs
+*.log
+
+# SerpiumUpdater build outputs
+/SerpiumUpdater/bin/
+/SerpiumUpdater/obj/
+
+# BEGIN SERPIUM LOCAL/PRIVATE EXCLUDES
 
-# Visual Studio state
-/.vs/
+# IDE and generated build results
+.vs/
+**/bin/
+**/obj/
+**/publish/
+**/TestResults/
 *.user
 *.suo
 *.userosscache
 *.sln.docstates
 
-# Local runtime data
-/bin_files/logs/
-/bin_files/tgws/TgWsProxy_data/
-/bin_files/tgws/telegram_proxy_link.txt
+# Important Serpium runtime binaries are source assets, not build output.
+!bin_files/bin/
+!bin_files/bin/**
+!bin_files/relay/
+!bin_files/relay/sing-box.exe
 
-# Publish profile user state
-/Properties/PublishProfiles/*.pubxml.user
+# Runtime state, diagnostics and crash data
+bin_files/relay/state/
+*.log
+*.dmp
+*.tmp
+*.bak
+*.backup
 
-# Packages and archives
-*.nupkg
-*.snupkg
+# Local/private profile storage
+profiles.yaml
+profiles.yml
+user.yaml
+user.yml
+profiles.json
+profiles.local.json
+config.local.json
+appsettings.local.json
+*.svault
+*.serpiumenc
+
+# Local archives and private key material
 *.zip
 *.7z
 *.rar
+*.pfx
+*.p12
+*.pem
+*.key
 
-# Logs
-*.log
-
-# SerpiumUpdater build outputs
-/SerpiumUpdater/bin/
-/SerpiumUpdater/obj/
+# END SERPIUM LOCAL/PRIVATE EXCLUDES
