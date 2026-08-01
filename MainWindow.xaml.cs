@@ -26,6 +26,7 @@ using SerpiumVPN.Relay;
 using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Providers.Avo;
+using SerpiumVPN.Relay.ProfileVault;
 using SerpiumVPN.Relay.SingBox;
 using SerpiumVPN.Relay.Xray;
 
@@ -57,8 +58,16 @@ namespace SerpiumVPN
         private readonly SerpiumSingBoxValidationService _singBoxValidationService = new();
         private readonly SerpiumSingBoxSessionManager _serpiumSingBoxSessionManager = new();
         private readonly SerpiumXraySessionManager _serpiumXraySessionManager = new();
+        private readonly SecureProfileVault _secureProfileVault = new();
         private SerpiumConnectionProfile? _validatedRelayProfile;
         private ProviderRuntimeProfile? _validatedProviderRuntimeProfile;
+        private bool _suppressRelayKeyTextChanged;
+        private bool _currentProviderProfileSaved;
+        private IReadOnlyList<SecureProfileVaultEntry> _savedProfileEntries =
+            Array.Empty<SecureProfileVaultEntry>();
+        private Guid? _activeSavedProfileId;
+        private int? _activeSavedProfileSocksPort;
+        private bool _savedProfileOperationInProgress;
         private string? _relayGatewayUuid;
 
         public static Action<string>? LocalUpdateRequested;
@@ -159,6 +168,8 @@ namespace SerpiumVPN
 
         private async void MainWindow_LoadedAsync(object sender, RoutedEventArgs e)
         {
+            await RefreshSecureProfileVaultStatusAsync();
+
             if (_settings.AutoUpdateFiles)
                 await CheckVendorUpdatesAsync(showSuccessMessage: false);
 
@@ -1363,9 +1374,13 @@ namespace SerpiumVPN
                         ? string.Join(", ", candidateProfile.Protocols.Select(
                             item => item.ToUpperInvariant()))
                         : "AVO";
+                    _activeSavedProfileId = null;
+                    _currentProviderProfileSaved = false;
+                    ButtonSaveRelayProfile.Content = "Сохранить профиль";
                     SetRelayStatus(
                         $"Статус: подключено через AVO — {protocols}; TUN {activeInterface}.",
                         WpfBrushes.LightGreen);
+                    UpdateRelayClientUi();
                     return;
                 }
 
@@ -1397,12 +1412,17 @@ namespace SerpiumVPN
                     profile,
                     socksPort);
 
+                _activeSavedProfileId = null;
+                _activeSavedProfileSocksPort = socksPort;
+                _currentProviderProfileSaved = false;
+                ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = $"SOCKS5: активен (127.0.0.1:{socksPort})";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
                 SetRelayStatus(
                     $"Статус: подключено через Xray — {profile.Protocol.ToUpperInvariant()}, " +
                     $"SOCKS5 127.0.0.1:{socksPort}",
                     WpfBrushes.LightGreen);
+                UpdateRelayClientUi();
             }
             catch (Exception ex)
             {
@@ -1457,9 +1477,14 @@ namespace SerpiumVPN
 
                 _validatedRelayProfile = null;
                 DisposeValidatedProviderRuntimeProfile();
+                _activeSavedProfileId = null;
+                _activeSavedProfileSocksPort = null;
+                _currentProviderProfileSaved = false;
+                ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
                 UpdateRelayClientUi();
+                await RefreshSecureProfileVaultStatusAsync();
 
                 if (stopError is not null)
                     throw stopError;
@@ -1483,6 +1508,20 @@ namespace SerpiumVPN
                                _serpiumXraySessionManager.HasLiveProcess;
             bool singBoxRunning = singBoxState == RelayGatewayState.Running ||
                                   _serpiumSingBoxSessionManager.HasLiveProcess;
+            if (_activeSavedProfileId.HasValue &&
+                !singBoxRunning &&
+                !xrayRunning &&
+                !_savedProfileOperationInProgress &&
+                singBoxState is RelayGatewayState.Stopped or RelayGatewayState.Failed &&
+                xrayState is RelayGatewayState.Stopped or RelayGatewayState.Failed)
+            {
+                _activeSavedProfileId = null;
+                _activeSavedProfileSocksPort = null;
+                _currentProviderProfileSaved = false;
+                _validatedRelayProfile = null;
+                DisposeValidatedProviderRuntimeProfile();
+            }
+
             bool isBusy = xrayBusy || singBoxBusy;
             bool isRunning = xrayRunning || singBoxRunning;
             bool providerMode =
@@ -1495,6 +1534,13 @@ namespace SerpiumVPN
                 xrayState == RelayGatewayState.Failed ||
                 singBoxState == RelayGatewayState.Failed;
             ButtonValidateRelayKey.IsEnabled = !isBusy && !isRunning;
+            ButtonSaveRelayProfile.IsEnabled =
+                !isBusy && !_currentProviderProfileSaved &&
+                ((singBoxRunning && _validatedProviderRuntimeProfile is not null) ||
+                 (xrayRunning && _validatedRelayProfile is not null));
+            ButtonSaveRelayProfile.Content = _currentProviderProfileSaved
+                ? "Профиль сохранён"
+                : "Сохранить профиль";
             RelayClientKeyTextBox.IsReadOnly = isBusy || isRunning;
             RelayClientSocksPortTextBox.IsEnabled = !providerMode && !isBusy && !isRunning;
 
@@ -1567,6 +1613,8 @@ namespace SerpiumVPN
                     _serpiumXraySessionManager.LastError,
                     WpfBrushes.OrangeRed);
             }
+
+            RenderSavedProfileCards(_savedProfileEntries);
         }
 
         private void CopyRelayKey_Click(object sender, RoutedEventArgs e)
@@ -1587,6 +1635,564 @@ namespace SerpiumVPN
             }
         }
 
+        private async void SaveRelayProfile_ClickAsync(object sender, RoutedEventArgs e)
+        {
+            ButtonSaveRelayProfile.IsEnabled = false;
+            try
+            {
+                bool providerReady =
+                    _validatedProviderRuntimeProfile is not null &&
+                    _serpiumSingBoxSessionManager.HasLiveProcess &&
+                    _serpiumSingBoxSessionManager.State == RelayGatewayState.Running;
+                bool xrayReady =
+                    _validatedRelayProfile is not null &&
+                    _serpiumXraySessionManager.HasLiveProcess &&
+                    _serpiumXraySessionManager.State == RelayGatewayState.Running;
+
+                if (!providerReady && !xrayReady)
+                {
+                    throw new InvalidOperationException(
+                        "Профиль можно сохранить только после успешного подключения.");
+                }
+
+                string sourceKey = RelayClientKeyTextBox.Text.Trim();
+                if (string.IsNullOrWhiteSpace(sourceKey))
+                {
+                    throw new InvalidOperationException(
+                        "Исходный ключ уже очищен или отсутствует. Повторите подключение.");
+                }
+
+                SetRelayStatus(
+                    "Статус: защищаем подготовленный профиль через Windows DPAPI…",
+                    WpfBrushes.DeepSkyBlue);
+
+                SecureProfileVaultSaveResult result;
+                string profileSummary;
+                string sourceDescription;
+
+                if (providerReady)
+                {
+                    ProviderRuntimeProfile providerProfile =
+                        _validatedProviderRuntimeProfile!;
+                    if (!sourceKey.StartsWith("avo://", StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException(
+                            "Текущий AVO-профиль не соответствует ключу в поле ввода.");
+                    }
+
+                    result = await _secureProfileVault.SaveProviderProfileAsync(
+                        providerProfile,
+                        sourceKey);
+                    profileSummary = BuildProviderRuntimeProfileSummary(providerProfile);
+                    sourceDescription = "Исходный avo:// ключ не сохранён";
+                }
+                else
+                {
+                    SerpiumConnectionProfile xrayProfile = _validatedRelayProfile!;
+                    SerpiumParseResult verification = _serpiumParser.Parse(sourceKey);
+                    if (!verification.Success || verification.Profile is null ||
+                        verification.Envelope is not null ||
+                        !string.Equals(
+                            verification.Profile.Protocol,
+                            xrayProfile.Protocol,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException(
+                            "Текущий Xray-профиль не соответствует ключу в поле ввода.");
+                    }
+
+                    int socksPort = int.TryParse(
+                        RelayClientSocksPortTextBox.Text.Trim(),
+                        out int parsedPort) && parsedPort is >= 1 and <= 65535
+                            ? parsedPort
+                            : 10808;
+
+                    result = await _secureProfileVault.SaveXrayProfileAsync(
+                        xrayProfile,
+                        socksPort,
+                        sourceKey);
+                    _activeSavedProfileSocksPort = socksPort;
+                    profileSummary = BuildRelayProfileSummary(xrayProfile);
+                    sourceDescription =
+                        $"Исходный {xrayProfile.Protocol.ToLowerInvariant()}:// ключ не сохранён";
+                }
+
+                _currentProviderProfileSaved = true;
+                _activeSavedProfileId = result.Entry.Id;
+                _suppressRelayKeyTextChanged = true;
+                try
+                {
+                    RelayClientKeyTextBox.Clear();
+                    try
+                    {
+                        if (Clipboard.ContainsText() &&
+                            string.Equals(
+                                Clipboard.GetText().Trim(),
+                                sourceKey,
+                                StringComparison.Ordinal))
+                        {
+                            Clipboard.Clear();
+                        }
+                    }
+                    catch
+                    {
+                        // Clipboard may be temporarily locked by another process.
+                    }
+                }
+                finally
+                {
+                    _suppressRelayKeyTextChanged = false;
+                }
+
+                RelayDetectedProfileTextBlock.Text =
+                    profileSummary +
+                    Environment.NewLine + Environment.NewLine +
+                    "Защищённое хранилище:" + Environment.NewLine +
+                    $"• {result.Entry.SafeDisplayName}" + Environment.NewLine +
+                    $"• {sourceDescription} и удалён из поля ввода." + Environment.NewLine +
+                    "• Подготовленный профиль защищён DPAPI CurrentUser.";
+
+                await RefreshSecureProfileVaultStatusAsync();
+                SetRelayStatus(
+                    result.UpdatedExisting
+                        ? "Статус: сохранённый профиль обновлён; исходный ключ очищен."
+                        : "Статус: профиль сохранён защищённо; исходный ключ очищен.",
+                    WpfBrushes.LightGreen);
+            }
+            catch (Exception ex)
+            {
+                SetRelayStatus(
+                    "Статус: профиль не сохранён — " + ex.Message,
+                    WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                UpdateRelayClientUi();
+            }
+        }
+
+        private async Task RefreshSecureProfileVaultStatusAsync()
+        {
+            try
+            {
+                _savedProfileEntries = await _secureProfileVault.ListProfilesAsync();
+                RelaySavedProfilesSection.Visibility = _savedProfileEntries.Count == 0
+                    ? Visibility.Collapsed
+                    : Visibility.Visible;
+                RelaySavedProfilesHeaderTextBlock.Text =
+                    $"Профили: {_savedProfileEntries.Count}";
+                RelayProfileVaultStateTextBlock.Text = _savedProfileEntries.Count == 0
+                    ? "Защищённое хранилище: профилей пока нет."
+                    : $"Защищённое хранилище: профилей {_savedProfileEntries.Count}.";
+                RelayProfileVaultStateTextBlock.Foreground = _savedProfileEntries.Count == 0
+                    ? WpfBrushes.Gray
+                    : WpfBrushes.LightGreen;
+                RenderSavedProfileCards(_savedProfileEntries);
+            }
+            catch (Exception ex)
+            {
+                _savedProfileEntries = Array.Empty<SecureProfileVaultEntry>();
+                RelaySavedProfilesPanel.Children.Clear();
+                RelaySavedProfilesSection.Visibility = Visibility.Collapsed;
+                RelayProfileVaultStateTextBlock.Text =
+                    "Защищённое хранилище недоступно: " + ex.Message;
+                RelayProfileVaultStateTextBlock.Foreground = WpfBrushes.OrangeRed;
+            }
+        }
+
+        private void RenderSavedProfileCards(
+            IReadOnlyList<SecureProfileVaultEntry> profiles)
+        {
+            if (RelaySavedProfilesPanel is null)
+                return;
+
+            RelaySavedProfilesPanel.Children.Clear();
+            bool engineRunning =
+                (_serpiumSingBoxSessionManager.HasLiveProcess &&
+                 _serpiumSingBoxSessionManager.State == RelayGatewayState.Running) ||
+                (_serpiumXraySessionManager.HasLiveProcess &&
+                 _serpiumXraySessionManager.State == RelayGatewayState.Running);
+            bool hasActiveProfile = _activeSavedProfileId.HasValue && engineRunning;
+
+            foreach (SecureProfileVaultEntry entry in profiles)
+            {
+                bool isActive = hasActiveProfile && _activeSavedProfileId == entry.Id;
+                bool blockedByAnother = hasActiveProfile && !isActive;
+
+                System.Windows.Controls.Border card = new()
+                {
+                    Background = new SolidColorBrush(Color.FromRgb(0x11, 0x11, 0x18)),
+                    BorderBrush = isActive
+                        ? new SolidColorBrush(Color.FromRgb(0x33, 0xD1, 0x7A))
+                        : new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x3A)),
+                    BorderThickness = new Thickness(isActive ? 1.5 : 1),
+                    CornerRadius = new CornerRadius(9),
+                    Padding = new Thickness(14, 12, 12, 12),
+                    Margin = new Thickness(0, 0, 0, 10),
+                    Opacity = blockedByAnother ? 0.38 : 1.0,
+                    IsHitTestVisible = !blockedByAnother
+                };
+
+                System.Windows.Controls.Grid layout = new();
+                layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+                {
+                    Width = new GridLength(1, GridUnitType.Star)
+                });
+                layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+                {
+                    Width = GridLength.Auto
+                });
+                layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+                {
+                    Width = GridLength.Auto
+                });
+
+                System.Windows.Controls.StackPanel description = new();
+                description.Children.Add(new System.Windows.Controls.TextBlock
+                {
+                    Text = entry.SafeDisplayName,
+                    Foreground = WpfBrushes.White,
+                    FontSize = 15,
+                    FontWeight = FontWeights.SemiBold,
+                    TextTrimming = TextTrimming.CharacterEllipsis
+                });
+                description.Children.Add(new System.Windows.Controls.TextBlock
+                {
+                    Text = entry.Protocols.Count == 0
+                        ? entry.Engine.ToUpperInvariant()
+                        : string.Join(" · ", entry.Protocols.Select(
+                            protocol => protocol.ToUpperInvariant())),
+                    Foreground = new SolidColorBrush(Color.FromRgb(0x9B, 0x9B, 0xA8)),
+                    Margin = new Thickness(0, 4, 0, 0),
+                    TextWrapping = TextWrapping.Wrap
+                });
+                description.Children.Add(new System.Windows.Controls.TextBlock
+                {
+                    Text = isActive
+                        ? string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase)
+                            ? $"Подключён · SOCKS5 127.0.0.1:{_activeSavedProfileSocksPort ?? 10808}"
+                            : $"Подключён · TUN {_serpiumSingBoxSessionManager.InterfaceName ?? "Serpium"}"
+                        : blockedByAnother
+                            ? "Недоступен, пока активен другой профиль"
+                            : "Готов к подключению",
+                    Foreground = isActive ? WpfBrushes.LightGreen : WpfBrushes.Gray,
+                    Margin = new Thickness(0, 5, 0, 0),
+                    FontSize = 12
+                });
+                layout.Children.Add(description);
+
+                System.Windows.Controls.Primitives.ToggleButton toggle = new()
+                {
+                    Style = (Style)RelaySavedProfilesSection.FindResource("RelayProfileToggleStyle"),
+                    IsChecked = isActive,
+                    IsEnabled = !_savedProfileOperationInProgress &&
+                                (!hasActiveProfile || isActive),
+                    Tag = entry.Id,
+                    Margin = new Thickness(16, 0, 10, 0),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    ToolTip = isActive ? "Отключить профиль" : "Подключить профиль"
+                };
+                toggle.Checked += SavedProfileToggle_CheckedAsync;
+                toggle.Unchecked += SavedProfileToggle_UncheckedAsync;
+                System.Windows.Controls.Grid.SetColumn(toggle, 1);
+                layout.Children.Add(toggle);
+
+                System.Windows.Controls.Button deleteButton = new()
+                {
+                    Style = (Style)RelaySavedProfilesSection.FindResource("RelayProfileDeleteButtonStyle"),
+                    Content = "🗑",
+                    Tag = entry.Id,
+                    IsEnabled = !_savedProfileOperationInProgress &&
+                                (!hasActiveProfile || isActive),
+                    VerticalAlignment = VerticalAlignment.Center,
+                    ToolTip = "Удалить профиль"
+                };
+                deleteButton.Click += DeleteSavedProfile_ClickAsync;
+                System.Windows.Controls.Grid.SetColumn(deleteButton, 2);
+                layout.Children.Add(deleteButton);
+
+                card.Child = layout;
+                RelaySavedProfilesPanel.Children.Add(card);
+            }
+        }
+
+        private async void SavedProfileToggle_CheckedAsync(
+            object sender,
+            RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle ||
+                toggle.Tag is not Guid profileId ||
+                _savedProfileOperationInProgress)
+            {
+                return;
+            }
+
+            bool anySavedEngineRunning =
+                _serpiumSingBoxSessionManager.State == RelayGatewayState.Running ||
+                _serpiumXraySessionManager.State == RelayGatewayState.Running;
+            if (_activeSavedProfileId == profileId && anySavedEngineRunning)
+                return;
+
+            if (_serpiumXraySessionManager.HasLiveProcess ||
+                _serpiumSingBoxSessionManager.HasLiveProcess)
+            {
+                SetRelayStatus(
+                    "Статус: сначала отключите текущее соединение.",
+                    WpfBrushes.Goldenrod);
+                await RefreshSecureProfileVaultStatusAsync();
+                return;
+            }
+
+            SecureProfileVaultEntry? entry =
+                _savedProfileEntries.FirstOrDefault(item => item.Id == profileId);
+            if (entry is null)
+            {
+                SetRelayStatus(
+                    "Статус: сохранённый профиль не найден.",
+                    WpfBrushes.OrangeRed);
+                await RefreshSecureProfileVaultStatusAsync();
+                return;
+            }
+
+            _savedProfileOperationInProgress = true;
+            RenderSavedProfileCards(_savedProfileEntries);
+            try
+            {
+                SetRelayStatus(
+                    "Статус: открываем сохранённый профиль через Windows DPAPI…",
+                    WpfBrushes.DeepSkyBlue);
+                RelayClientLogTextBox.Clear();
+
+                if (string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase))
+                {
+                    DisposeValidatedProviderRuntimeProfile();
+                    SecureXrayVaultProfile savedXray =
+                        await _secureProfileVault.OpenXrayProfileAsync(profileId);
+                    _validatedRelayProfile = savedXray.Profile;
+                    _activeSavedProfileSocksPort = savedXray.SocksPort;
+
+                    string relayDir = IOPath.Combine(
+                        IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                        "bin_files",
+                        "relay");
+
+                    RelayClientSocksStateTextBlock.Text = "SOCKS5: запускается…";
+                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.DeepSkyBlue;
+                    await _serpiumXraySessionManager.StartAsync(
+                        IOPath.Combine(relayDir, "xray.exe"),
+                        IOPath.Combine(relayDir, "configs", "key-client.json"),
+                        savedXray.Profile,
+                        savedXray.SocksPort);
+
+                    _activeSavedProfileId = profileId;
+                    _currentProviderProfileSaved = true;
+                    RelayDetectedProfileTextBlock.Text =
+                        BuildRelayProfileSummary(savedXray.Profile) +
+                        Environment.NewLine + Environment.NewLine +
+                        "Профиль загружен из Serpium Secure Profile Vault.";
+                    RelayClientSocksStateTextBlock.Text =
+                        $"SOCKS5: активен (127.0.0.1:{savedXray.SocksPort})";
+                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
+                    SetRelayStatus(
+                        $"Статус: сохранённый профиль подключён через Xray — " +
+                        $"{savedXray.Profile.Protocol.ToUpperInvariant()}, " +
+                        $"SOCKS5 127.0.0.1:{savedXray.SocksPort}.",
+                        WpfBrushes.LightGreen);
+                }
+                else
+                {
+                    _validatedRelayProfile = null;
+                    _activeSavedProfileSocksPort = null;
+                    DisposeValidatedProviderRuntimeProfile();
+                    _validatedProviderRuntimeProfile =
+                        await _secureProfileVault.OpenProviderProfileAsync(profileId);
+
+                    string singBoxRelayDir = IOPath.Combine(
+                        IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                        "bin_files",
+                        "relay");
+
+                    RelayClientSocksStateTextBlock.Text = "TUN: запускается…";
+                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.DeepSkyBlue;
+                    await _serpiumSingBoxSessionManager.StartAsync(
+                        IOPath.Combine(singBoxRelayDir, "sing-box.exe"),
+                        _validatedProviderRuntimeProfile);
+
+                    _activeSavedProfileId = profileId;
+                    _currentProviderProfileSaved = true;
+                    RelayDetectedProfileTextBlock.Text =
+                        BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile) +
+                        Environment.NewLine + Environment.NewLine +
+                        "Профиль загружен из Serpium Secure Profile Vault.";
+
+                    string protocols = _validatedProviderRuntimeProfile.Protocols.Count > 0
+                        ? string.Join(", ", _validatedProviderRuntimeProfile.Protocols.Select(
+                            item => item.ToUpperInvariant()))
+                        : "AVO";
+                    string activeInterface =
+                        _serpiumSingBoxSessionManager.InterfaceName ?? "Serpium TUN";
+                    SetRelayStatus(
+                        $"Статус: сохранённый профиль подключён — {protocols}; " +
+                        $"TUN {activeInterface}.",
+                        WpfBrushes.LightGreen);
+                }
+            }
+            catch (Exception ex)
+            {
+                _activeSavedProfileId = null;
+                _activeSavedProfileSocksPort = null;
+                _currentProviderProfileSaved = false;
+                _validatedRelayProfile = null;
+                DisposeValidatedProviderRuntimeProfile();
+                SetRelayStatus(
+                    "Статус: сохранённый профиль не подключён — " + ex.Message,
+                    WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _savedProfileOperationInProgress = false;
+                UpdateRelayClientUi();
+                await RefreshSecureProfileVaultStatusAsync();
+            }
+        }
+
+        private async void SavedProfileToggle_UncheckedAsync(
+            object sender,
+            RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle ||
+                toggle.Tag is not Guid profileId ||
+                _activeSavedProfileId != profileId ||
+                _savedProfileOperationInProgress)
+            {
+                return;
+            }
+
+            _savedProfileOperationInProgress = true;
+            RenderSavedProfileCards(_savedProfileEntries);
+            try
+            {
+                SetRelayStatus("Статус: отключение профиля…", WpfBrushes.Goldenrod);
+                await StopActiveSavedProfileAsync();
+                SetRelayStatus(
+                    "Статус: профиль отключён; сетевой транспорт освобождён.",
+                    WpfBrushes.Gray);
+            }
+            catch (Exception ex)
+            {
+                SetRelayStatus(
+                    "Статус: ошибка отключения профиля — " + ex.Message,
+                    WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _savedProfileOperationInProgress = false;
+                UpdateRelayClientUi();
+                await RefreshSecureProfileVaultStatusAsync();
+            }
+        }
+
+        private async Task StopActiveSavedProfileAsync()
+        {
+            Exception? stopError = null;
+            try
+            {
+                if (_serpiumSingBoxSessionManager.HasLiveProcess ||
+                    _serpiumSingBoxSessionManager.State is RelayGatewayState.Starting or
+                        RelayGatewayState.Running or RelayGatewayState.Stopping or
+                        RelayGatewayState.Failed)
+                {
+                    try
+                    {
+                        await _serpiumSingBoxSessionManager.StopAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        stopError ??= ex;
+                    }
+                }
+
+                if (_serpiumXraySessionManager.HasLiveProcess ||
+                    _serpiumXraySessionManager.State is RelayGatewayState.Starting or
+                        RelayGatewayState.Running or RelayGatewayState.Stopping or
+                        RelayGatewayState.Failed)
+                {
+                    try
+                    {
+                        await _serpiumXraySessionManager.StopAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        stopError ??= ex;
+                    }
+                }
+            }
+            finally
+            {
+                _activeSavedProfileId = null;
+                _activeSavedProfileSocksPort = null;
+                _currentProviderProfileSaved = false;
+                _validatedRelayProfile = null;
+                DisposeValidatedProviderRuntimeProfile();
+                ButtonSaveRelayProfile.Content = "Сохранить профиль";
+                RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
+                RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
+            }
+
+            if (stopError is not null)
+                throw stopError;
+        }
+
+        private async void DeleteSavedProfile_ClickAsync(
+            object sender,
+            RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Button button ||
+                button.Tag is not Guid profileId ||
+                _savedProfileOperationInProgress)
+            {
+                return;
+            }
+
+            MessageBoxResult answer = MessageBox.Show(
+                this,
+                "Вы действительно хотите удалить этот профиль?" +
+                Environment.NewLine + Environment.NewLine +
+                "Все сохранённые данные этого профиля будут удалены из Serpium.",
+                "Удаление профиля",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning,
+                MessageBoxResult.No);
+            if (answer != MessageBoxResult.Yes)
+                return;
+
+            _savedProfileOperationInProgress = true;
+            RenderSavedProfileCards(_savedProfileEntries);
+            try
+            {
+                if (_activeSavedProfileId == profileId)
+                    await StopActiveSavedProfileAsync();
+
+                bool deleted = await _secureProfileVault.DeleteProfileAsync(profileId);
+                SetRelayStatus(
+                    deleted
+                        ? "Статус: профиль и его сохранённые данные удалены."
+                        : "Статус: профиль уже отсутствует в хранилище.",
+                    deleted ? WpfBrushes.LightGreen : WpfBrushes.Goldenrod);
+            }
+            catch (Exception ex)
+            {
+                SetRelayStatus(
+                    "Статус: профиль не удалён — " + ex.Message,
+                    WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _savedProfileOperationInProgress = false;
+                UpdateRelayClientUi();
+                await RefreshSecureProfileVaultStatusAsync();
+            }
+        }
         private async void ValidateRelayKey_Click(object sender, RoutedEventArgs e)
         {
             ButtonValidateRelayKey.IsEnabled = false;
@@ -1755,6 +2361,12 @@ namespace SerpiumVPN
 
         private void RelayClientKeyTextBox_TextChanged(object sender, System.Windows.Controls.TextChangedEventArgs e)
         {
+            if (_suppressRelayKeyTextChanged)
+                return;
+
+            _currentProviderProfileSaved = false;
+            _activeSavedProfileSocksPort = null;
+            ButtonSaveRelayProfile.Content = "Сохранить профиль";
             _validatedRelayProfile = null;
             DisposeValidatedProviderRuntimeProfile();
             if (!IsLoaded)
