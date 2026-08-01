@@ -23,11 +23,13 @@ using WpfBrushes = System.Windows.Media.Brushes;
 using Clipboard = System.Windows.Clipboard;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using SerpiumVPN.Relay;
+using SerpiumVPN.Relay.Diagnostics;
 using SerpiumVPN.Relay.Lifecycle;
 using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Providers.Avo;
 using SerpiumVPN.Relay.ProfileVault;
+using SerpiumVPN.Relay.Routing;
 using SerpiumVPN.Relay.SingBox;
 using SerpiumVPN.Relay.Xray;
 
@@ -59,8 +61,12 @@ namespace SerpiumVPN
         private readonly SerpiumKeyValidationService _serpiumKeyValidationService = new();
         private readonly SerpiumSingBoxValidationService _singBoxValidationService = new();
         private readonly SerpiumSingBoxSessionManager _serpiumSingBoxSessionManager = new();
-        private readonly SerpiumXraySessionManager _serpiumXraySessionManager = new();
+        private readonly SecureXraySessionManager _serpiumXraySessionManager = new();
         private readonly SecureProfileVault _secureProfileVault = new();
+        private readonly SecureRoutingRegistry _secureRoutingRegistry = new();
+        private IReadOnlyList<RoutingRegistryEntry> _routingRegistryEntries =
+            Array.Empty<RoutingRegistryEntry>();
+        private bool _routingRegistryOperationInProgress;
         private SerpiumConnectionProfile? _validatedRelayProfile;
         private ProviderRuntimeProfile? _validatedProviderRuntimeProfile;
         private bool _suppressRelayKeyTextChanged;
@@ -94,21 +100,21 @@ namespace SerpiumVPN
             _xrayGatewayManager.StateChanged += state => SafeDispatcherInvoke(() => UpdateRelayGatewayUi(state));
             _xrayGatewayManager.LogReceived += line => SafeDispatcherInvoke(() =>
             {
-                RelayGatewayLogTextBox.AppendText(line + Environment.NewLine);
+                RelayGatewayLogTextBox.AppendText(SensitiveDiagnosticRedactor.RedactText(line) + Environment.NewLine);
                 RelayGatewayLogTextBox.ScrollToEnd();
             });
             _serpiumXraySessionManager.StateChanged += _ =>
                 SafeDispatcherInvoke(UpdateRelayClientUi);
             _serpiumXraySessionManager.LogReceived += line => SafeDispatcherInvoke(() =>
             {
-                RelayClientLogTextBox.AppendText(line + Environment.NewLine);
+                RelayClientLogTextBox.AppendText(SensitiveDiagnosticRedactor.RedactText(line) + Environment.NewLine);
                 RelayClientLogTextBox.ScrollToEnd();
             });
             _serpiumSingBoxSessionManager.StateChanged += _ =>
                 SafeDispatcherInvoke(UpdateRelayClientUi);
             _serpiumSingBoxSessionManager.LogReceived += line => SafeDispatcherInvoke(() =>
             {
-                RelayClientLogTextBox.AppendText(line + Environment.NewLine);
+                RelayClientLogTextBox.AppendText(SensitiveDiagnosticRedactor.RedactText(line) + Environment.NewLine);
                 RelayClientLogTextBox.ScrollToEnd();
             });
             _strategyMonitorTimer = new DispatcherTimer
@@ -143,6 +149,10 @@ namespace SerpiumVPN
             int attribute,
             ref int attributeValue,
             int attributeSize);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool DeleteObject(IntPtr objectHandle);
 
         private void MainWindow_SourceInitialized(object? sender, EventArgs e)
         {
@@ -181,6 +191,7 @@ namespace SerpiumVPN
         {
             bool recoveredPreviousSession = await RecoverRelayLifecycleAtStartupAsync();
             await RefreshSecureProfileVaultStatusAsync();
+            await RefreshRoutingRegistryAsync();
             _relayLifecycleTimer.Start();
 
             if (recoveredPreviousSession)
@@ -720,7 +731,7 @@ namespace SerpiumVPN
 
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
-            MainNavigationTabs.SelectedIndex = 3;
+            MainNavigationTabs.SelectedIndex = 4;
         }
 
         private void ProgramSettingsToggle_Changed(object sender, RoutedEventArgs e)
@@ -1334,7 +1345,10 @@ namespace SerpiumVPN
                         "Подключение уже запущено. Сначала нажмите «Отключиться».");
                 }
 
-                SerpiumParseResult parseResult = _serpiumParser.Parse(RelayClientKeyTextBox.Text);
+                EncodedKeyEnvelopeDecodeResult encodedInput =
+                    EncodedKeyEnvelopeDecoder.Decode(RelayClientKeyTextBox.Text);
+                SerpiumParseResult parseResult =
+                    _serpiumParser.Parse(encodedInput.NormalizedKey);
                 if (!parseResult.Success)
                     throw new FormatException(parseResult.Error);
 
@@ -1442,7 +1456,8 @@ namespace SerpiumVPN
 
                 SerpiumConnectionProfile profile = parseResult.Profile;
                 _validatedRelayProfile = profile;
-                RelayDetectedProfileTextBlock.Text = BuildRelayProfileSummary(profile);
+                RelayDetectedProfileTextBlock.Text =
+                    encodedInput.SafeSummaryPrefix + BuildRelayProfileSummary(profile);
                 RelayClientLogTextBox.Clear();
                 SetRelayStatus("Статус: подключение через Xray…", WpfBrushes.DeepSkyBlue);
                 RelayClientSocksStateTextBlock.Text = "SOCKS5: запускается…";
@@ -1466,9 +1481,12 @@ namespace SerpiumVPN
                 ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = $"SOCKS5: активен (127.0.0.1:{socksPort})";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
+                string encodedInputStatus = encodedInput.WasDecoded
+                    ? "; Base64-контейнер раскрыт локально"
+                    : string.Empty;
                 SetRelayStatus(
                     $"Статус: подключено через Xray — {profile.Protocol.ToUpperInvariant()}, " +
-                    $"SOCKS5 127.0.0.1:{socksPort}",
+                    $"SOCKS5 127.0.0.1:{socksPort}{encodedInputStatus}",
                     WpfBrushes.LightGreen);
                 UpdateRelayClientUi();
             }
@@ -1476,7 +1494,7 @@ namespace SerpiumVPN
             {
                 RelayClientSocksStateTextBlock.Text = "SOCKS5: остановлен";
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
-                SetRelayStatus("Статус: ошибка подключения — " + ex.Message, WpfBrushes.OrangeRed);
+                SetRelayStatus("Статус: ошибка подключения — " + SensitiveDiagnosticRedactor.RedactText(ex.Message), WpfBrushes.OrangeRed);
                 UpdateRelayClientUi();
             }
         }
@@ -1692,6 +1710,9 @@ namespace SerpiumVPN
                 }
 
                 string sourceKey = RelayClientKeyTextBox.Text.Trim();
+                EncodedKeyEnvelopeDecodeResult sourceEnvelope =
+                    EncodedKeyEnvelopeDecoder.Decode(sourceKey);
+                string normalizedSourceKey = sourceEnvelope.NormalizedKey;
                 if (string.IsNullOrWhiteSpace(sourceKey))
                 {
                     throw new InvalidOperationException(
@@ -1710,7 +1731,7 @@ namespace SerpiumVPN
                 {
                     ProviderRuntimeProfile providerProfile =
                         _validatedProviderRuntimeProfile!;
-                    if (!sourceKey.StartsWith("avo://", StringComparison.OrdinalIgnoreCase))
+                    if (!normalizedSourceKey.StartsWith("avo://", StringComparison.OrdinalIgnoreCase))
                     {
                         throw new InvalidOperationException(
                             "Текущий AVO-профиль не соответствует ключу в поле ввода.");
@@ -1718,14 +1739,16 @@ namespace SerpiumVPN
 
                     result = await _secureProfileVault.SaveProviderProfileAsync(
                         providerProfile,
-                        sourceKey);
+                        normalizedSourceKey);
                     profileSummary = BuildProviderRuntimeProfileSummary(providerProfile);
-                    sourceDescription = "Исходный avo:// ключ не сохранён";
+                    sourceDescription = sourceEnvelope.WasDecoded
+                        ? "Исходный Base64-контейнер и раскрытый avo:// ключ не сохранены"
+                        : "Исходный avo:// ключ не сохранён";
                 }
                 else
                 {
                     SerpiumConnectionProfile xrayProfile = _validatedRelayProfile!;
-                    SerpiumParseResult verification = _serpiumParser.Parse(sourceKey);
+                    SerpiumParseResult verification = _serpiumParser.Parse(normalizedSourceKey);
                     if (!verification.Success || verification.Profile is null ||
                         verification.Envelope is not null ||
                         !string.Equals(
@@ -1746,11 +1769,12 @@ namespace SerpiumVPN
                     result = await _secureProfileVault.SaveXrayProfileAsync(
                         xrayProfile,
                         socksPort,
-                        sourceKey);
+                        normalizedSourceKey);
                     _activeSavedProfileSocksPort = socksPort;
                     profileSummary = BuildRelayProfileSummary(xrayProfile);
-                    sourceDescription =
-                        $"Исходный {xrayProfile.Protocol.ToLowerInvariant()}:// ключ не сохранён";
+                    sourceDescription = sourceEnvelope.WasDecoded
+                        ? $"Исходный Base64-контейнер и раскрытый {xrayProfile.Protocol.ToLowerInvariant()}:// ключ не сохранены"
+                        : $"Исходный {xrayProfile.Protocol.ToLowerInvariant()}:// ключ не сохранён";
                 }
 
                 _currentProviderProfileSaved = true;
@@ -1934,7 +1958,7 @@ namespace SerpiumVPN
                                 (!hasActiveProfile || isActive),
                     Tag = entry.Id,
                     Margin = new Thickness(16, 0, 10, 0),
-                    VerticalAlignment = VerticalAlignment.Center,
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center,
                     ToolTip = isActive ? "Отключить профиль" : "Подключить профиль"
                 };
                 toggle.Checked += SavedProfileToggle_CheckedAsync;
@@ -1949,7 +1973,7 @@ namespace SerpiumVPN
                     Tag = entry.Id,
                     IsEnabled = !_savedProfileOperationInProgress &&
                                 (!hasActiveProfile || isActive),
-                    VerticalAlignment = VerticalAlignment.Center,
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center,
                     ToolTip = "Удалить профиль"
                 };
                 deleteButton.Click += DeleteSavedProfile_ClickAsync;
@@ -2255,6 +2279,633 @@ namespace SerpiumVPN
             }
         }
 
+        private async Task RefreshRoutingRegistryAsync()
+        {
+            try
+            {
+                _routingRegistryEntries = await _secureRoutingRegistry.ListAsync();
+                RenderRoutingRegistryCards();
+
+                int enabledCount = _routingRegistryEntries.Count(entry => entry.IsEnabled);
+                SetRoutingStatus(
+                    _routingRegistryEntries.Count == 0
+                        ? "Реестр маршрутизации пуст. Добавьте приложение, игру или сайт."
+                        : $"Правила сохранены защищённо: {_routingRegistryEntries.Count}; включено: {enabledCount}.",
+                    _routingRegistryEntries.Count == 0 ? WpfBrushes.Gray : WpfBrushes.LightGreen);
+            }
+            catch (Exception ex)
+            {
+                _routingRegistryEntries = Array.Empty<RoutingRegistryEntry>();
+                RenderRoutingRegistryCards();
+                SetRoutingStatus(
+                    "Реестр маршрутизации недоступен: " + ex.Message,
+                    WpfBrushes.OrangeRed);
+            }
+        }
+
+        private void RenderRoutingRegistryCards()
+        {
+            if (RoutingApplicationsPanel is null || RoutingSitesPanel is null)
+                return;
+
+            RoutingApplicationsPanel.Children.Clear();
+            RoutingSitesPanel.Children.Clear();
+
+            RoutingRegistryEntry[] applications = _routingRegistryEntries
+                .Where(entry => entry.Kind == RoutingTargetKind.Application)
+                .ToArray();
+            RoutingRegistryEntry[] websites = _routingRegistryEntries
+                .Where(entry => entry.Kind == RoutingTargetKind.Website)
+                .ToArray();
+
+            RoutingApplicationsCountTextBlock.Text = applications.Length.ToString(CultureInfo.InvariantCulture);
+            RoutingSitesCountTextBlock.Text = websites.Length.ToString(CultureInfo.InvariantCulture);
+            RoutingEnabledCountTextBlock.Text = _routingRegistryEntries
+                .Count(entry => entry.IsEnabled)
+                .ToString(CultureInfo.InvariantCulture);
+
+            RoutingApplicationsEmptyTextBlock.Visibility = applications.Length == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            RoutingSitesEmptyTextBlock.Visibility = websites.Length == 0
+                ? Visibility.Visible
+                : Visibility.Collapsed;
+            ClearRoutingRegistryButton.IsEnabled =
+                !_routingRegistryOperationInProgress && _routingRegistryEntries.Count > 0;
+
+            foreach (RoutingRegistryEntry entry in applications)
+                RoutingApplicationsPanel.Children.Add(CreateRoutingCard(entry));
+
+            foreach (RoutingRegistryEntry entry in websites)
+                RoutingSitesPanel.Children.Add(CreateRoutingCard(entry));
+        }
+
+        private System.Windows.Controls.Border CreateRoutingCard(RoutingRegistryEntry entry)
+        {
+            bool fileMissing = entry.Kind == RoutingTargetKind.Application &&
+                               !File.Exists(entry.PrimaryValue);
+
+            System.Windows.Controls.Border card = new()
+            {
+                Background = new SolidColorBrush(Color.FromRgb(0x11, 0x11, 0x18)),
+                BorderBrush = entry.IsEnabled && !fileMissing
+                    ? new SolidColorBrush(Color.FromRgb(0x2F, 0x72, 0x50))
+                    : fileMissing
+                        ? new SolidColorBrush(Color.FromRgb(0x9A, 0x5D, 0x35))
+                        : new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x3A)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(9),
+                Padding = new Thickness(14, 12, 12, 12),
+                Margin = new Thickness(0, 0, 0, 10),
+                Opacity = _routingRegistryOperationInProgress ? 0.58 : 1.0
+            };
+
+            System.Windows.Controls.Grid layout = new();
+            layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+            {
+                Width = new GridLength(52)
+            });
+            layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+            {
+                Width = new GridLength(1, GridUnitType.Star)
+            });
+            layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+            layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+            layout.ColumnDefinitions.Add(new System.Windows.Controls.ColumnDefinition
+            {
+                Width = GridLength.Auto
+            });
+
+            System.Windows.FrameworkElement iconElement = CreateRoutingIcon(entry);
+            iconElement.VerticalAlignment = System.Windows.VerticalAlignment.Top;
+            layout.Children.Add(iconElement);
+
+            System.Windows.Controls.StackPanel description = new()
+            {
+                Margin = new Thickness(0, 0, 12, 0)
+            };
+            description.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = entry.DisplayName,
+                Foreground = WpfBrushes.White,
+                FontSize = 15,
+                FontWeight = FontWeights.SemiBold,
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = entry.DisplayName
+            });
+
+            int existingExecutableCount = entry.Kind == RoutingTargetKind.Application
+                ? entry.RelatedExecutables.Count(File.Exists)
+                : 0;
+            string details = entry.Kind == RoutingTargetKind.Application
+                ? $"{IOPath.GetFileName(entry.PrimaryValue)} · EXE в группе: {Math.Max(1, entry.RelatedExecutables.Length)} · доступно: {existingExecutableCount}"
+                : entry.IncludeSubdomains
+                    ? "Домен и все поддомены"
+                    : "Только указанный домен";
+            description.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = details,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x9B, 0x9B, 0xA8)),
+                Margin = new Thickness(0, 4, 0, 0),
+                TextWrapping = TextWrapping.Wrap
+            });
+
+            string location = entry.Kind == RoutingTargetKind.Application
+                ? entry.PrimaryValue
+                : entry.PrimaryValue;
+            description.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = location,
+                Foreground = new SolidColorBrush(Color.FromRgb(0x6F, 0x6F, 0x7D)),
+                FontSize = 11,
+                Margin = new Thickness(0, 4, 0, 0),
+                TextTrimming = TextTrimming.CharacterEllipsis,
+                ToolTip = entry.Kind == RoutingTargetKind.Application
+                    ? string.Join(Environment.NewLine, entry.RelatedExecutables)
+                    : entry.PrimaryValue
+            });
+
+            description.Children.Add(new System.Windows.Controls.TextBlock
+            {
+                Text = fileMissing
+                    ? "Файл не найден"
+                    : entry.IsEnabled
+                        ? "Подготовлено для VPN-шлюза"
+                        : "Исключено из VPN-маршрутизации",
+                Foreground = fileMissing
+                    ? WpfBrushes.OrangeRed
+                    : entry.IsEnabled
+                        ? WpfBrushes.LightGreen
+                        : WpfBrushes.Gray,
+                FontSize = 12,
+                FontWeight = FontWeights.SemiBold,
+                Margin = new Thickness(0, 5, 0, 0)
+            });
+            System.Windows.Controls.Grid.SetColumn(description, 1);
+            layout.Children.Add(description);
+
+            if (entry.Kind == RoutingTargetKind.Application)
+            {
+                System.Windows.Controls.Button bundleButton = new()
+                {
+                    Style = (Style)RoutingApplicationsPanel.FindResource("RoutingBundleButtonStyle"),
+                    Content = "Состав",
+                    Tag = entry.Id,
+                    IsEnabled = !_routingRegistryOperationInProgress,
+                    Margin = new Thickness(10, 0, 8, 0),
+                    VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                    ToolTip = "Проверить EXE группы и запустить наблюдение за процессами"
+                };
+                bundleButton.Click += EditRoutingApplicationBundle_ClickAsync;
+                System.Windows.Controls.Grid.SetColumn(bundleButton, 2);
+                layout.Children.Add(bundleButton);
+            }
+
+            System.Windows.Controls.Primitives.ToggleButton toggle = new()
+            {
+                Style = (Style)RoutingApplicationsPanel.FindResource("RoutingToggleStyle"),
+                IsChecked = entry.IsEnabled,
+                IsEnabled = !_routingRegistryOperationInProgress,
+                Tag = entry.Id,
+                Margin = new Thickness(entry.Kind == RoutingTargetKind.Application ? 0 : 16, 0, 10, 0),
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                ToolTip = entry.IsEnabled
+                    ? "Не направлять через VPN-шлюз"
+                    : "Направлять через VPN-шлюз"
+            };
+            toggle.Checked += RoutingToggle_ChangedAsync;
+            toggle.Unchecked += RoutingToggle_ChangedAsync;
+            System.Windows.Controls.Grid.SetColumn(toggle, 3);
+            layout.Children.Add(toggle);
+
+            System.Windows.Controls.Button deleteButton = new()
+            {
+                Style = (Style)RoutingApplicationsPanel.FindResource("RoutingDeleteButtonStyle"),
+                Content = "🗑",
+                Tag = entry.Id,
+                IsEnabled = !_routingRegistryOperationInProgress,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center,
+                ToolTip = "Удалить из списка маршрутизации"
+            };
+            deleteButton.Click += DeleteRoutingEntry_ClickAsync;
+            System.Windows.Controls.Grid.SetColumn(deleteButton, 4);
+            layout.Children.Add(deleteButton);
+
+            card.Child = layout;
+            return card;
+        }
+
+        private static System.Windows.FrameworkElement CreateRoutingIcon(RoutingRegistryEntry entry)
+        {
+            if (entry.Kind == RoutingTargetKind.Application)
+            {
+                System.Windows.Media.ImageSource? imageSource = TryLoadExecutableIcon(entry.PrimaryValue);
+                if (imageSource is not null)
+                {
+                    return new System.Windows.Controls.Image
+                    {
+                        Source = imageSource,
+                        Width = 38,
+                        Height = 38,
+                        Stretch = Stretch.Uniform,
+                        HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+                    };
+                }
+            }
+
+            System.Windows.Controls.Border fallback = new()
+            {
+                Width = 40,
+                Height = 40,
+                CornerRadius = new CornerRadius(10),
+                Background = entry.Kind == RoutingTargetKind.Website
+                    ? new SolidColorBrush(Color.FromRgb(0x23, 0x23, 0x37))
+                    : new SolidColorBrush(Color.FromRgb(0x26, 0x3D, 0x35)),
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Left
+            };
+            fallback.Child = new System.Windows.Controls.TextBlock
+            {
+                Text = entry.Kind == RoutingTargetKind.Website ? "🌐" : "▣",
+                FontSize = 20,
+                HorizontalAlignment = System.Windows.HorizontalAlignment.Center,
+                VerticalAlignment = System.Windows.VerticalAlignment.Center
+            };
+            return fallback;
+        }
+
+        private static System.Windows.Media.ImageSource? TryLoadExecutableIcon(string executablePath)
+        {
+            if (!File.Exists(executablePath))
+                return null;
+
+            try
+            {
+                using Drawing.Icon? icon = Drawing.Icon.ExtractAssociatedIcon(executablePath);
+                if (icon is null)
+                    return null;
+
+                using Drawing.Bitmap bitmap = icon.ToBitmap();
+                IntPtr bitmapHandle = bitmap.GetHbitmap();
+                try
+                {
+                    System.Windows.Media.Imaging.BitmapSource source =
+                        System.Windows.Interop.Imaging.CreateBitmapSourceFromHBitmap(
+                            bitmapHandle,
+                            IntPtr.Zero,
+                            Int32Rect.Empty,
+                            System.Windows.Media.Imaging.BitmapSizeOptions.FromEmptyOptions());
+                    source.Freeze();
+                    return source;
+                }
+                finally
+                {
+                    DeleteObject(bitmapHandle);
+                }
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        private async void AddRoutingApplication_ClickAsync(object sender, RoutedEventArgs e)
+        {
+            if (_routingRegistryOperationInProgress)
+                return;
+
+            OpenFileDialog fileDialog = new()
+            {
+                Title = "Выберите приложение, игру или лаунчер",
+                Filter = "Приложения Windows (*.exe)|*.exe",
+                CheckFileExists = true,
+                Multiselect = false,
+                DereferenceLinks = true
+            };
+
+            if (fileDialog.ShowDialog(this) != true)
+                return;
+
+            RoutingApplicationBundleDialog bundleDialog;
+            try
+            {
+                bundleDialog = new RoutingApplicationBundleDialog(fileDialog.FileName)
+                {
+                    Owner = this
+                };
+
+                if (bundleDialog.ShowDialog() != true)
+                {
+                    SetRoutingStatus("Добавление приложения отменено.", WpfBrushes.Gray);
+                    return;
+                }
+            }
+            catch (Exception ex)
+            {
+                string diagnosticMessage =
+                    "Редактор группы приложения не открылся: " + ex.Message;
+
+                try
+                {
+                    string diagnosticsDirectory = Path.Combine(
+                        Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+                        "SerpiumVPN_Diagnostics");
+                    Directory.CreateDirectory(diagnosticsDirectory);
+
+                    string diagnosticPath = Path.Combine(
+                        diagnosticsDirectory,
+                        "BundleDialog_" +
+                        DateTime.Now.ToString("yyyyMMdd_HHmmss") +
+                        ".txt");
+
+                    File.WriteAllText(
+                        diagnosticPath,
+                        "SerpiumVPN v1.0.50 Bundle Dialog" +
+                        Environment.NewLine +
+                        "Selected EXE: " + fileDialog.FileName +
+                        Environment.NewLine +
+                        Environment.NewLine +
+                        ex);
+
+                    diagnosticMessage +=
+                        " Диагностика сохранена: " + diagnosticPath;
+                }
+                catch
+                {
+                    // Failure to write a local diagnostic must not terminate Serpium.
+                }
+
+                SetRoutingStatus(diagnosticMessage, WpfBrushes.OrangeRed);
+                return;
+            }
+
+            _routingRegistryOperationInProgress = true;
+            RenderRoutingRegistryCards();
+            try
+            {
+                SetRoutingStatus("Сохраняем проверенную группу EXE…", WpfBrushes.Goldenrod);
+                RoutingRegistryEntry added = await _secureRoutingRegistry.AddApplicationBundleAsync(
+                    bundleDialog.DisplayName,
+                    fileDialog.FileName,
+                    bundleDialog.SelectedExecutables);
+                await RefreshRoutingRegistryAsync();
+                SetRoutingStatus(
+                    $"Добавлено: {added.DisplayName}; EXE в группе: {added.ExecutableCount}.",
+                    WpfBrushes.LightGreen);
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus("Приложение не добавлено: " + ex.Message, WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _routingRegistryOperationInProgress = false;
+                RenderRoutingRegistryCards();
+            }
+        }
+
+        private async void EditRoutingApplicationBundle_ClickAsync(object sender, RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Button button ||
+                button.Tag is not Guid entryId ||
+                _routingRegistryOperationInProgress)
+            {
+                return;
+            }
+
+            RoutingRegistryEntry? entry = _routingRegistryEntries.FirstOrDefault(item =>
+                item.Id == entryId && item.Kind == RoutingTargetKind.Application);
+            if (entry is null)
+                return;
+
+            if (!File.Exists(entry.PrimaryValue))
+            {
+                SetRoutingStatus(
+                    "Основной EXE не найден. Удалите карточку и добавьте приложение заново.",
+                    WpfBrushes.OrangeRed);
+                return;
+            }
+
+            RoutingApplicationBundleDialog dialog = new(
+                entry.PrimaryValue,
+                entry.DisplayName,
+                entry.RelatedExecutables)
+            {
+                Owner = this
+            };
+            if (dialog.ShowDialog() != true)
+                return;
+
+            _routingRegistryOperationInProgress = true;
+            RenderRoutingRegistryCards();
+            try
+            {
+                RoutingRegistryEntry updated = await _secureRoutingRegistry.UpdateApplicationBundleAsync(
+                    entry.Id,
+                    dialog.DisplayName,
+                    entry.PrimaryValue,
+                    dialog.SelectedExecutables);
+                await RefreshRoutingRegistryAsync();
+                SetRoutingStatus(
+                    $"Группа обновлена: {updated.DisplayName}; EXE: {updated.ExecutableCount}.",
+                    WpfBrushes.LightGreen);
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus("Состав группы не обновлён: " + ex.Message, WpfBrushes.OrangeRed);
+                await RefreshRoutingRegistryAsync();
+            }
+            finally
+            {
+                _routingRegistryOperationInProgress = false;
+                RenderRoutingRegistryCards();
+            }
+        }
+
+        private async void AddRoutingSite_ClickAsync(object sender, RoutedEventArgs e)
+        {
+            if (_routingRegistryOperationInProgress)
+                return;
+
+            RoutingSiteDialog dialog = new()
+            {
+                Owner = this
+            };
+            if (dialog.ShowDialog() != true)
+                return;
+
+            _routingRegistryOperationInProgress = true;
+            RenderRoutingRegistryCards();
+            try
+            {
+                RoutingRegistryEntry added = await _secureRoutingRegistry.AddWebsiteAsync(
+                    dialog.Domain,
+                    dialog.IncludeSubdomains);
+                await RefreshRoutingRegistryAsync();
+                SetRoutingStatus(
+                    $"Сайт добавлен: {added.DisplayName}.",
+                    WpfBrushes.LightGreen);
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus("Сайт не добавлен: " + ex.Message, WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _routingRegistryOperationInProgress = false;
+                RenderRoutingRegistryCards();
+            }
+        }
+
+        private async void RoutingToggle_ChangedAsync(object sender, RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle ||
+                toggle.Tag is not Guid entryId ||
+                _routingRegistryOperationInProgress)
+            {
+                return;
+            }
+
+            bool isEnabled = toggle.IsChecked == true;
+            _routingRegistryOperationInProgress = true;
+            RenderRoutingRegistryCards();
+            try
+            {
+                bool updated = await _secureRoutingRegistry.SetEnabledAsync(entryId, isEnabled);
+                if (!updated)
+                    throw new InvalidOperationException("Правило уже отсутствует в реестре.");
+
+                await RefreshRoutingRegistryAsync();
+                SetRoutingStatus(
+                    isEnabled
+                        ? "Правило включено для будущего VPN-шлюза."
+                        : "Правило исключено из VPN-маршрутизации.",
+                    isEnabled ? WpfBrushes.LightGreen : WpfBrushes.Gray);
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus("Не удалось изменить правило: " + ex.Message, WpfBrushes.OrangeRed);
+                await RefreshRoutingRegistryAsync();
+            }
+            finally
+            {
+                _routingRegistryOperationInProgress = false;
+                RenderRoutingRegistryCards();
+            }
+        }
+
+        private async void DeleteRoutingEntry_ClickAsync(object sender, RoutedEventArgs e)
+        {
+            if (sender is not System.Windows.Controls.Button button ||
+                button.Tag is not Guid entryId ||
+                _routingRegistryOperationInProgress)
+            {
+                return;
+            }
+
+            RoutingRegistryEntry? entry = _routingRegistryEntries
+                .FirstOrDefault(item => item.Id == entryId);
+            if (entry is null)
+                return;
+
+            bool isApplication = entry.Kind == RoutingTargetKind.Application;
+            RoutingConfirmDialog dialog = new(
+                "Удаление правила",
+                isApplication
+                    ? "Удалить приложение из VPN-маршрутизации?"
+                    : "Удалить сайт из VPN-маршрутизации?",
+                entry.DisplayName,
+                isApplication
+                    ? "Само приложение или игра останется установленным. Serpium удалит только запись и связанную группу EXE из своего реестра маршрутизации."
+                    : "Serpium удалит только доменное правило из своего реестра. Сохранённые VPN-профили не изменятся.",
+                "Удалить")
+            {
+                Owner = this
+            };
+
+            if (dialog.ShowDialog() != true)
+                return;
+
+            _routingRegistryOperationInProgress = true;
+            RenderRoutingRegistryCards();
+            try
+            {
+                bool deleted = await _secureRoutingRegistry.DeleteAsync(entryId);
+                await RefreshRoutingRegistryAsync();
+                SetRoutingStatus(
+                    deleted
+                        ? "Правило удалено из реестра маршрутизации."
+                        : "Правило уже отсутствовало в реестре.",
+                    deleted ? WpfBrushes.LightGreen : WpfBrushes.Goldenrod);
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus("Правило не удалено: " + ex.Message, WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _routingRegistryOperationInProgress = false;
+                RenderRoutingRegistryCards();
+            }
+        }
+
+        private async void ClearRoutingRegistry_ClickAsync(object sender, RoutedEventArgs e)
+        {
+            if (_routingRegistryOperationInProgress || _routingRegistryEntries.Count == 0)
+                return;
+
+            RoutingConfirmDialog dialog = new(
+                "Очистка маршрутизации",
+                "Удалить весь список маршрутизации?",
+                $"Правил: {_routingRegistryEntries.Count}",
+                "Будут удалены все записи приложений, групп EXE и сайтов. Установленные программы, игры и сохранённые VPN-профили останутся без изменений.",
+                "Удалить список")
+            {
+                Owner = this
+            };
+
+            if (dialog.ShowDialog() != true)
+                return;
+
+            _routingRegistryOperationInProgress = true;
+            RenderRoutingRegistryCards();
+            try
+            {
+                int removed = await _secureRoutingRegistry.ClearAsync();
+                await RefreshRoutingRegistryAsync();
+                SetRoutingStatus(
+                    $"Список маршрутизации очищен. Удалено правил: {removed}.",
+                    WpfBrushes.LightGreen);
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus("Список не очищен: " + ex.Message, WpfBrushes.OrangeRed);
+            }
+            finally
+            {
+                _routingRegistryOperationInProgress = false;
+                RenderRoutingRegistryCards();
+            }
+        }
+
+        private void SetRoutingStatus(string text, WpfBrush foreground)
+        {
+            RoutingStatusTextBlock.Text = text;
+            RoutingStatusTextBlock.Foreground = foreground;
+            RoutingStatusIndicator.Fill = foreground;
+
+            RoutingStatusBorder.BorderBrush = foreground == WpfBrushes.OrangeRed
+                ? new SolidColorBrush(Color.FromRgb(0x82, 0x3F, 0x45))
+                : foreground == WpfBrushes.LightGreen
+                    ? new SolidColorBrush(Color.FromRgb(0x36, 0x72, 0x50))
+                    : new SolidColorBrush(Color.FromRgb(0x34, 0x34, 0x42));
+        }
+
         private async Task<bool> RecoverRelayLifecycleAtStartupAsync()
         {
             _activeSavedProfileId = null;
@@ -2500,12 +3151,15 @@ namespace SerpiumVPN
             ButtonValidateRelayKey.IsEnabled = false;
             try
             {
-                SerpiumParseResult parseResult = _serpiumParser.Parse(RelayClientKeyTextBox.Text);
+                EncodedKeyEnvelopeDecodeResult encodedInput =
+                    EncodedKeyEnvelopeDecoder.Decode(RelayClientKeyTextBox.Text);
+                SerpiumParseResult parseResult =
+                    _serpiumParser.Parse(encodedInput.NormalizedKey);
                 if (!parseResult.Success)
                 {
                     _validatedRelayProfile = null;
                     RelayDetectedProfileTextBlock.Text = "Ключ не распознан.";
-                    SetRelayStatus("Статус: ключ отклонён — " + parseResult.Error, WpfBrushes.OrangeRed);
+                    SetRelayStatus("Статус: ключ отклонён — " + SensitiveDiagnosticRedactor.RedactText(parseResult.Error), WpfBrushes.OrangeRed);
                     return;
                 }
 
@@ -2609,9 +3263,12 @@ namespace SerpiumVPN
 
                 SerpiumConnectionProfile profile = parseResult.Profile;
                 _validatedRelayProfile = profile;
-                RelayDetectedProfileTextBlock.Text = BuildRelayProfileSummary(profile);
+                RelayDetectedProfileTextBlock.Text =
+                    encodedInput.SafeSummaryPrefix + BuildRelayProfileSummary(profile);
                 SetRelayStatus(
-                    $"Статус: проверяем {profile.Protocol.ToUpperInvariant()}-ключ и Xray-конфигурацию…",
+                    encodedInput.WasDecoded
+                        ? $"Статус: Base64-контейнер раскрыт локально — проверяем {profile.Protocol.ToUpperInvariant()} и Xray-конфигурацию…"
+                        : $"Статус: проверяем {profile.Protocol.ToUpperInvariant()}-ключ и Xray-конфигурацию…",
                     WpfBrushes.DeepSkyBlue);
 
                 string relayDir = IOPath.Combine(
@@ -2638,22 +3295,26 @@ namespace SerpiumVPN
 
                 if (validation.ServerReachable)
                 {
+                    string safeServer =
+                        SensitiveDiagnosticRedactor.MaskHost(profile.Server);
                     SetRelayStatus(
                         $"Статус: ключ распознан — {profile.Protocol.ToUpperInvariant()}; " +
-                        $"сервер {profile.Server}:{profile.Port} доступен.",
+                        $"сервер {safeServer}:{profile.Port} доступен.",
                         WpfBrushes.LightGreen);
                 }
                 else
                 {
+                    string safeServer =
+                        SensitiveDiagnosticRedactor.MaskHost(profile.Server);
                     SetRelayStatus(
-                        $"Статус: ключ корректен, но сервер {profile.Server}:{profile.Port} " +
+                        $"Статус: ключ корректен, но сервер {safeServer}:{profile.Port} " +
                         "не ответил на TCP-проверку.",
                         WpfBrushes.Goldenrod);
                 }
             }
             catch (Exception ex)
             {
-                SetRelayStatus("Статус: ошибка проверки — " + ex.Message, WpfBrushes.OrangeRed);
+                SetRelayStatus("Статус: ошибка проверки — " + SensitiveDiagnosticRedactor.RedactText(ex.Message), WpfBrushes.OrangeRed);
             }
             finally
             {
@@ -2769,7 +3430,7 @@ namespace SerpiumVPN
             summary.Append(profile.Security.ToUpperInvariant());
             summary.AppendLine();
             summary.Append("Сервер: ");
-            summary.Append(profile.Server);
+            summary.Append(SensitiveDiagnosticRedactor.MaskHost(profile.Server));
             summary.Append(':');
             summary.Append(profile.Port);
 
@@ -2778,15 +3439,21 @@ namespace SerpiumVPN
             {
                 summary.AppendLine();
                 summary.Append("SNI: ");
-                summary.Append(profile.ServerName);
+                summary.Append(SensitiveDiagnosticRedactor.MaskHost(profile.ServerName));
             }
 
-            if (!string.IsNullOrWhiteSpace(profile.Name))
+            string safeProfileName =
+                SensitiveDiagnosticRedactor.SanitizeProfileName(profile.Name);
+            if (!string.IsNullOrWhiteSpace(safeProfileName))
             {
                 summary.AppendLine();
                 summary.Append("Профиль: ");
-                summary.Append(profile.Name);
+                summary.Append(safeProfileName);
             }
+
+            summary.AppendLine();
+            summary.Append(
+                "Данные доступа: UUID, пароли, ключи Reality и полные URI скрыты.");
 
             return summary.ToString();
         }

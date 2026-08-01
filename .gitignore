@@ -88,3 +88,61 @@ appsettings.local.json
 *.key
 
 # END SERPIUM LOCAL/PRIVATE EXCLUDES
+
+# BEGIN SERPIUM SECURITY SAFE POINT
+# IDE and root build output
+/.vs/
+/bin/
+/obj/
+/publish/
+/SerpiumUpdater/bin/
+/SerpiumUpdater/obj/
+
+# SDK and temporary project build output
+/SDK/**/bin/
+/SDK/**/obj/
+**/*_wpftmp.csproj
+**/*_wpftmp.csproj.*
+
+# User-specific IDE files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Serpium private/runtime data
+*.svault
+*.sroutes
+**/key-client.json
+/bin_files/relay/state/
+/bin_files/relay/configs/key-client.json
+**/tailscaled.state
+**/tailscaled.log
+**/tailscaled.log.*
+**/tailscaled.log.conf
+
+# Logs, dumps and local diagnostics
+*.log
+*.dmp
+*.dump
+*.etl
+*.trace
+
+# Private credentials and certificate containers
+*.pem
+*.key
+*.pfx
+*.p12
+*.ovpn
+.env
+.env.*
+**/*auth-key*
+**/*authkey*
+**/*preauth-key*
+**/*preauthkey*
+
+# Local backup/output folders
+/SerpiumVPN_Backups/
+/Security_Audit/
+/TestResults/
+# END SERPIUM SECURITY SAFE POINT

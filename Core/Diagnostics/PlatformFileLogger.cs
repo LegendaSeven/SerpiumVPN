@@ -1,6 +1,7 @@
-using System;
+﻿using System;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace SerpiumVPN.Core;
 
@@ -11,6 +12,23 @@ namespace SerpiumVPN.Core;
 public sealed class PlatformFileLogger
 {
     private const long RotationThresholdBytes = 2 * 1024 * 1024;
+
+    private static readonly Regex KeyUriRegex = new(
+        @"(?i)\b(vless|vmess|trojan|avo)://[^\s""'<>]+",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex UuidRegex = new(
+        @"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex LongEncodedTokenRegex = new(
+        @"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{80,}={0,2}(?![A-Za-z0-9+/_-])",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex SensitiveAssignmentRegex = new(
+        @"(?i)\b(auth[-_]?key|preauth[-_]?key|password|passwd|token|secret|private[-_]?key|pbk|sid|shortid|uuid)\s*[:=]\s*([^\s,;""']+|""[^""]*"")",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private readonly object _sync = new();
 
     public PlatformFileLogger(string logPath)
@@ -45,7 +63,11 @@ public sealed class PlatformFileLogger
         if (string.IsNullOrWhiteSpace(message))
             return;
 
-        string line = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} {message}{Environment.NewLine}";
+        string safeMessage = RedactSensitiveText(message);
+        string line =
+            $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} " +
+            safeMessage +
+            Environment.NewLine;
 
         lock (_sync)
         {
@@ -64,6 +86,58 @@ public sealed class PlatformFileLogger
         }
     }
 
+    private static string RedactSensitiveText(string value)
+    {
+        string redacted = KeyUriRegex.Replace(
+            value,
+            match => match.Groups[1].Value.ToUpperInvariant() + "://[REDACTED]");
+
+        redacted = UuidRegex.Replace(redacted, "[UUID REDACTED]");
+        redacted = LongEncodedTokenRegex.Replace(
+            redacted,
+            "[ENCODED TOKEN REDACTED]");
+
+        redacted = SensitiveAssignmentRegex.Replace(
+            redacted,
+            match => match.Groups[1].Value + "=[REDACTED]");
+
+        return redacted;
+    }
+
+    private static void SanitizeExistingLog(string path)
+    {
+        try
+        {
+            if (!File.Exists(path))
+                return;
+
+            FileInfo info = new(path);
+            if (info.Length > 8 * 1024 * 1024)
+            {
+                File.Delete(path);
+                return;
+            }
+
+            string original = File.ReadAllText(path, Encoding.UTF8);
+            string sanitized = RedactSensitiveText(original);
+
+            if (!string.Equals(
+                    original,
+                    sanitized,
+                    StringComparison.Ordinal))
+            {
+                File.WriteAllText(
+                    path,
+                    sanitized,
+                    new UTF8Encoding(false));
+            }
+        }
+        catch
+        {
+            // Existing diagnostic history is optional.
+        }
+    }
+
     private void PrepareLogFile()
     {
         lock (_sync)
@@ -74,6 +148,7 @@ public sealed class PlatformFileLogger
                     ?? AppContext.BaseDirectory;
 
                 Directory.CreateDirectory(directory);
+                SanitizeExistingLog(LogPath);
 
                 if (!File.Exists(LogPath) ||
                     new FileInfo(LogPath).Length < RotationThresholdBytes)
@@ -86,6 +161,7 @@ public sealed class PlatformFileLogger
                     "platform-runtime.previous.log");
 
                 File.Move(LogPath, previousLogPath, overwrite: true);
+                SanitizeExistingLog(previousLogPath);
             }
             catch
             {

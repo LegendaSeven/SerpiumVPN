@@ -1,4 +1,4 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using SerpiumVPN.Core;
@@ -24,7 +24,25 @@ public sealed class SerpiumNetEngine : IRelayGatewayEngine, IAsyncDisposable
     private static readonly Regex TailscaleLoginUrlRegex = new(
         @"https://login\.tailscale\.com/a/[A-Za-z0-9_-]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
+    private static readonly Regex KeyUriRegex = new(
+        @"(?i)\b(vless|vmess|trojan|avo)://[^\s""'<>]+",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex UuidRegex = new(
+        @"(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex LongEncodedTokenRegex = new(
+        @"(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{80,}={0,2}(?![A-Za-z0-9+/_-])",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex SensitiveAssignmentRegex = new(
+        @"(?i)\b(auth[-_]?key|preauth[-_]?key|password|passwd|token|secret|private[-_]?key|pbk|sid|shortid|uuid)\s*[:=]\s*([^\s,;""']+|""[^""]*"")",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
     private static readonly object LogSync = new();
+    private static bool _existingLogSanitized;
 
     private readonly SemaphoreSlim _lifecycleLock = new(1, 1);
     private Process? _process;
@@ -42,7 +60,7 @@ public sealed class SerpiumNetEngine : IRelayGatewayEngine, IAsyncDisposable
     public ComponentInfo Info { get; } = new()
     {
         Name = "SerpiumNet",
-        Version = "0.5.1",
+        Version = "0.5.2",
         Type = ComponentType.Engine
     };
 
@@ -707,11 +725,65 @@ public sealed class SerpiumNetEngine : IRelayGatewayEngine, IAsyncDisposable
         }
     }
 
-    private static string RedactSensitiveUrls(string line)
+    private static string RedactSensitiveUrls(string line) =>
+        RedactSensitiveText(line);
+
+    private static string RedactSensitiveText(string value)
     {
-        return TailscaleLoginUrlRegex.Replace(
-            line,
+        string redacted = TailscaleLoginUrlRegex.Replace(
+            value,
             "<tailscale-login-url-redacted>");
+
+        redacted = KeyUriRegex.Replace(
+            redacted,
+            match => match.Groups[1].Value.ToUpperInvariant() + "://[REDACTED]");
+
+        redacted = UuidRegex.Replace(redacted, "[UUID REDACTED]");
+        redacted = LongEncodedTokenRegex.Replace(
+            redacted,
+            "[ENCODED TOKEN REDACTED]");
+
+        redacted = SensitiveAssignmentRegex.Replace(
+            redacted,
+            match => match.Groups[1].Value + "=[REDACTED]");
+
+        return redacted;
+    }
+
+    private static void SanitizeExistingLog(string path)
+    {
+        if (_existingLogSanitized)
+            return;
+
+        _existingLogSanitized = true;
+
+        try
+        {
+            if (!File.Exists(path))
+                return;
+
+            FileInfo info = new(path);
+            if (info.Length > 8 * 1024 * 1024)
+            {
+                File.Delete(path);
+                return;
+            }
+
+            string original = File.ReadAllText(path);
+            string sanitized = RedactSensitiveText(original);
+
+            if (!string.Equals(
+                    original,
+                    sanitized,
+                    StringComparison.Ordinal))
+            {
+                File.WriteAllText(path, sanitized);
+            }
+        }
+        catch
+        {
+            // Existing diagnostic history is optional.
+        }
     }
 
     private static async Task<string> ProbeVersionAsync(string executablePath)
@@ -829,13 +901,21 @@ public sealed class SerpiumNetEngine : IRelayGatewayEngine, IAsyncDisposable
                 "Logs");
             Directory.CreateDirectory(logDirectory);
 
-            string line = $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} [SerpiumNetEngine] {message}{Environment.NewLine}";
+            string logPath = Path.Combine(
+                logDirectory,
+                "serpium-net-engine.log");
 
             lock (LogSync)
             {
-                File.AppendAllText(
-                    Path.Combine(logDirectory, "serpium-net-engine.log"),
-                    line);
+                SanitizeExistingLog(logPath);
+
+                string safeMessage = RedactSensitiveText(message);
+                string line =
+                    $"{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss.fff zzz} " +
+                    $"[SerpiumNetEngine] {safeMessage}" +
+                    Environment.NewLine;
+
+                File.AppendAllText(logPath, line);
             }
         }
         catch

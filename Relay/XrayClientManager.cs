@@ -1,8 +1,9 @@
-using System.Diagnostics;
+﻿using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text;
 using System.Text.Json;
 
 namespace SerpiumVPN.Relay;
@@ -13,7 +14,24 @@ public sealed class XrayClientManager : IDisposable
     private Process? _bridgeProcess;
     private string? _statePath;
     private string? _clientExePath;
+    private string? _configPath;
+    private string? _legacyConfigPath;
     private TaskCompletionSource<int>? _bridgeReady;
+
+    private static readonly string PrivateRuntimeDirectory = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        "SerpiumVPN",
+        "Runtime",
+        "Xray");
+
+    private static readonly string PrivateRuntimeConfigPath = Path.Combine(
+        PrivateRuntimeDirectory,
+        "key-client.json");
+
+    public XrayClientManager()
+    {
+        CleanupKnownStaleConfigFiles();
+    }
 
     public RelayGatewayState State { get; private set; } =
         RelayGatewayState.Stopped;
@@ -47,6 +65,11 @@ public sealed class XrayClientManager : IDisposable
                 "xray.exe не найден. Положите его в bin_files\\relay\\xray.exe.",
                 sourceXrayPath);
         }
+
+        _legacyConfigPath = Path.GetFullPath(configPath);
+        _configPath = PrivateRuntimeConfigPath;
+        EnsurePrivateRuntimeDirectory();
+        CleanupKnownStaleConfigFiles(_legacyConfigPath);
 
         string relayDirectory =
             Directory.GetParent(Path.GetDirectoryName(configPath)!)?.FullName
@@ -84,7 +107,7 @@ public sealed class XrayClientManager : IDisposable
 
             File.Copy(sourceXrayPath, _clientExePath, overwrite: true);
 
-            string configDirectory = Path.GetDirectoryName(configPath)!;
+            string configDirectory = Path.GetDirectoryName(_configPath)!;
             string logDirectory = Path.Combine(relayDirectory, "logs", "client");
 
             Directory.CreateDirectory(configDirectory);
@@ -96,7 +119,10 @@ public sealed class XrayClientManager : IDisposable
                 socksPort,
                 logDirectory);
 
-            await File.WriteAllTextAsync(configPath, json, cancellationToken);
+            await WriteSensitiveConfigAsync(
+                _configPath,
+                json,
+                cancellationToken);
 
             ProcessStartInfo startInfo = new()
             {
@@ -109,7 +135,7 @@ public sealed class XrayClientManager : IDisposable
             };
             startInfo.ArgumentList.Add("run");
             startInfo.ArgumentList.Add("-config");
-            startInfo.ArgumentList.Add(configPath);
+            startInfo.ArgumentList.Add(_configPath);
 
             _process = new Process
             {
@@ -130,6 +156,7 @@ public sealed class XrayClientManager : IDisposable
             _process.Exited += (_, _) =>
             {
                 DeleteStateFile();
+                DeleteRuntimeConfig();
 
                 if (State is RelayGatewayState.Stopping or RelayGatewayState.Stopped)
                     return;
@@ -159,6 +186,11 @@ public sealed class XrayClientManager : IDisposable
                     "до открытия SOCKS-порта.");
             }
 
+            // Xray reads its configuration during startup. Remove the plaintext
+            // file as soon as the local SOCKS listener proves that startup
+            // completed. The in-memory process keeps the parsed configuration.
+            DeleteRuntimeConfig();
+
             SetState(RelayGatewayState.Running);
         }
         catch (Exception ex)
@@ -167,6 +199,7 @@ public sealed class XrayClientManager : IDisposable
             TryKillProcess();
             await StopBridgeOnlyAsync(CancellationToken.None);
             DeleteStateFile();
+            DeleteRuntimeConfig();
             SetState(RelayGatewayState.Failed);
             throw;
         }
@@ -195,6 +228,7 @@ public sealed class XrayClientManager : IDisposable
             _process?.Dispose();
             _process = null;
             DeleteStateFile();
+            DeleteRuntimeConfig();
             SerpiumNetClientConfig.DeleteBridgeRuntime();
             SetState(RelayGatewayState.Stopped);
         }
@@ -568,6 +602,141 @@ public sealed class XrayClientManager : IDisposable
         }
     }
 
+    private static void EnsurePrivateRuntimeDirectory()
+    {
+        Directory.CreateDirectory(PrivateRuntimeDirectory);
+
+        try
+        {
+            File.SetAttributes(
+                PrivateRuntimeDirectory,
+                File.GetAttributes(PrivateRuntimeDirectory) |
+                FileAttributes.Hidden |
+                FileAttributes.NotContentIndexed);
+        }
+        catch
+        {
+            // LocalAppData already inherits the current user's private ACL.
+            // Attributes are only additional hygiene and must not block startup.
+        }
+    }
+
+    private static async Task WriteSensitiveConfigAsync(
+        string path,
+        string content,
+        CancellationToken cancellationToken)
+    {
+        EnsurePrivateRuntimeDirectory();
+        BestEffortDeleteSensitiveFile(path);
+
+        await File.WriteAllTextAsync(
+            path,
+            content,
+            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false),
+            cancellationToken);
+
+        try
+        {
+            File.SetAttributes(
+                path,
+                File.GetAttributes(path) |
+                FileAttributes.Hidden |
+                FileAttributes.NotContentIndexed);
+        }
+        catch
+        {
+            // File attributes are not a cryptographic boundary.
+        }
+    }
+
+    private void DeleteRuntimeConfig()
+    {
+        CleanupKnownStaleConfigFiles(_configPath);
+        CleanupKnownStaleConfigFiles(_legacyConfigPath);
+    }
+
+    private static void CleanupKnownStaleConfigFiles(
+        string? additionalPath = null)
+    {
+        HashSet<string> paths = new(StringComparer.OrdinalIgnoreCase)
+        {
+            PrivateRuntimeConfigPath,
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "bin_files",
+                "relay",
+                "configs",
+                "key-client.json"),
+            Path.Combine(
+                AppContext.BaseDirectory,
+                "bin_files",
+                "relay",
+                "configs",
+                "client.json")
+        };
+
+        if (!string.IsNullOrWhiteSpace(additionalPath))
+        {
+            try
+            {
+                paths.Add(Path.GetFullPath(additionalPath));
+            }
+            catch
+            {
+                // Ignore malformed stale paths; normal validation handles the
+                // active path before it is used.
+            }
+        }
+
+        foreach (string path in paths)
+            BestEffortDeleteSensitiveFile(path);
+    }
+
+    private static void BestEffortDeleteSensitiveFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return;
+
+        try
+        {
+            if (!File.Exists(path))
+                return;
+
+            try
+            {
+                using FileStream stream = new(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Write,
+                    FileShare.None);
+
+                long remaining = stream.Length;
+                byte[] zeroBuffer = new byte[16 * 1024];
+                stream.Position = 0;
+
+                while (remaining > 0)
+                {
+                    int count = (int)Math.Min(zeroBuffer.Length, remaining);
+                    stream.Write(zeroBuffer, 0, count);
+                    remaining -= count;
+                }
+
+                stream.Flush(flushToDisk: true);
+                Array.Clear(zeroBuffer, 0, zeroBuffer.Length);
+            }
+            catch
+            {
+                // Secure overwrite is best-effort. Deletion is still required.
+            }
+
+            File.Delete(path);
+        }
+        catch
+        {
+            // Runtime cleanup must not block disconnect or application exit.
+        }
+    }
+
     private void SaveState(int pid, int socksPort, string executablePath)
     {
         if (string.IsNullOrWhiteSpace(_statePath))
@@ -684,6 +853,7 @@ public sealed class XrayClientManager : IDisposable
         }
 
         DeleteStateFile();
+        DeleteRuntimeConfig();
         SerpiumNetClientConfig.DeleteBridgeRuntime();
         GC.SuppressFinalize(this);
     }

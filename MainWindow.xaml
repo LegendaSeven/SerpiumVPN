@@ -964,6 +964,316 @@
                 </Grid>
             </TabItem>
 
+            <TabItem Header="⇢  Маршрутизация">
+                <Grid Background="#1E1E24">
+                    <Grid.Resources>
+                        <Style x:Key="RoutingButtonStyle" TargetType="Button">
+                            <Setter Property="Height" Value="42"/>
+                            <Setter Property="Padding" Value="16,8"/>
+                            <Setter Property="Background" Value="#252530"/>
+                            <Setter Property="Foreground" Value="#EEEEF2"/>
+                            <Setter Property="BorderBrush" Value="#3A3A49"/>
+                            <Setter Property="BorderThickness" Value="1"/>
+                            <Setter Property="FontSize" Value="13"/>
+                            <Setter Property="FontWeight" Value="SemiBold"/>
+                            <Setter Property="Cursor" Value="Hand"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="Button">
+                                        <Border x:Name="ButtonBorder"
+                                                Background="{TemplateBinding Background}"
+                                                BorderBrush="{TemplateBinding BorderBrush}"
+                                                BorderThickness="{TemplateBinding BorderThickness}"
+                                                CornerRadius="8">
+                                            <ContentPresenter HorizontalAlignment="Center"
+                                                              VerticalAlignment="Center"
+                                                              Margin="{TemplateBinding Padding}"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="ButtonBorder" Property="Background" Value="#343447"/>
+                                                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="#00C875"/>
+                                            </Trigger>
+                                            <Trigger Property="IsPressed" Value="True">
+                                                <Setter TargetName="ButtonBorder" Property="Background" Value="#191923"/>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter TargetName="ButtonBorder" Property="Opacity" Value="0.42"/>
+                                                <Setter Property="Cursor" Value="Arrow"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+
+                        <Style x:Key="RoutingPrimaryButtonStyle"
+                               TargetType="Button"
+                               BasedOn="{StaticResource RoutingButtonStyle}">
+                            <Setter Property="Background" Value="#087C3D"/>
+                            <Setter Property="BorderBrush" Value="#14B85E"/>
+                            <Setter Property="Foreground" Value="#FFFFFF"/>
+                        </Style>
+
+                        <Style x:Key="RoutingDangerButtonStyle"
+                               TargetType="Button"
+                               BasedOn="{StaticResource RoutingButtonStyle}">
+                            <Setter Property="Background" Value="#3A2429"/>
+                            <Setter Property="BorderBrush" Value="#70404A"/>
+                            <Setter Property="Foreground" Value="#F2B7BE"/>
+                        </Style>
+
+                        <Style x:Key="RoutingToggleStyle" TargetType="ToggleButton">
+                            <Setter Property="Width" Value="52"/>
+                            <Setter Property="Height" Value="28"/>
+                            <Setter Property="Background" Value="Transparent"/>
+                            <Setter Property="BorderThickness" Value="0"/>
+                            <Setter Property="Cursor" Value="Hand"/>
+                            <Setter Property="Template">
+                                <Setter.Value>
+                                    <ControlTemplate TargetType="ToggleButton">
+                                        <Border x:Name="Track"
+                                                Background="#353542"
+                                                BorderBrush="#4A4A58"
+                                                BorderThickness="1"
+                                                CornerRadius="14">
+                                            <Ellipse x:Name="Knob"
+                                                     Width="20"
+                                                     Height="20"
+                                                     Fill="#D8D8DE"
+                                                     HorizontalAlignment="Left"
+                                                     Margin="3"/>
+                                        </Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsChecked" Value="True">
+                                                <Setter TargetName="Track" Property="Background" Value="#1F7A4D"/>
+                                                <Setter TargetName="Track" Property="BorderBrush" Value="#33D17A"/>
+                                                <Setter TargetName="Knob" Property="HorizontalAlignment" Value="Right"/>
+                                                <Setter TargetName="Knob" Property="Fill" Value="#FFFFFF"/>
+                                            </Trigger>
+                                            <Trigger Property="IsMouseOver" Value="True">
+                                                <Setter TargetName="Track" Property="BorderBrush" Value="#71E6A8"/>
+                                            </Trigger>
+                                            <Trigger Property="IsEnabled" Value="False">
+                                                <Setter TargetName="Track" Property="Opacity" Value="0.45"/>
+                                            </Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate>
+                                </Setter.Value>
+                            </Setter>
+                        </Style>
+
+                        <Style x:Key="RoutingDeleteButtonStyle"
+                               TargetType="Button"
+                               BasedOn="{StaticResource RoutingButtonStyle}">
+                            <Setter Property="Width" Value="42"/>
+                            <Setter Property="Height" Value="34"/>
+                            <Setter Property="Padding" Value="0"/>
+                            <Setter Property="FontSize" Value="15"/>
+                            <Setter Property="Background" Value="#24242F"/>
+                            <Setter Property="BorderBrush" Value="#3B3B48"/>
+                        </Style>
+
+                        <Style x:Key="RoutingBundleButtonStyle"
+                               TargetType="Button"
+                               BasedOn="{StaticResource RoutingButtonStyle}">
+                            <Setter Property="Height" Value="34"/>
+                            <Setter Property="MinWidth" Value="74"/>
+                            <Setter Property="Padding" Value="11,5"/>
+                            <Setter Property="FontSize" Value="11"/>
+                            <Setter Property="Background" Value="#202A2A"/>
+                            <Setter Property="BorderBrush" Value="#365548"/>
+                            <Setter Property="Foreground" Value="#BCE8D1"/>
+                        </Style>
+                    </Grid.Resources>
+
+                    <ScrollViewer VerticalScrollBarVisibility="Auto"
+                                  HorizontalScrollBarVisibility="Disabled">
+                        <StackPanel Margin="34" MaxWidth="920">
+                            <TextBlock Text="Маршрутизация"
+                                       Foreground="#FFFFFF"
+                                       FontSize="32"
+                                       FontWeight="SemiBold"/>
+                            <TextBlock Text="Выберите приложения, игры и сайты, которые будут направляться через активный VPN-шлюз Serpium Relay."
+                                       Foreground="#8E8E9B"
+                                       FontSize="14"
+                                       TextWrapping="Wrap"
+                                       Margin="0,6,0,18"/>
+
+                            <Border x:Name="RoutingStatusBorder"
+                                    Background="#171720"
+                                    BorderBrush="#343442"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="14,11"
+                                    Margin="0,0,0,16">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
+                                    <Ellipse x:Name="RoutingStatusIndicator"
+                                             Width="10"
+                                             Height="10"
+                                             Fill="#777783"
+                                             VerticalAlignment="Top"
+                                             Margin="0,4,12,0"/>
+                                    <TextBlock x:Name="RoutingStatusTextBlock"
+                                               Grid.Column="1"
+                                               Text="Реестр маршрутизации загружается…"
+                                               Foreground="#B9B9C4"
+                                               FontWeight="SemiBold"
+                                               TextWrapping="Wrap"/>
+                                </Grid>
+                            </Border>
+
+                            <UniformGrid Columns="3" Margin="0,0,0,16">
+                                <Border Background="#14141B"
+                                        BorderBrush="#2A2A36"
+                                        BorderThickness="1"
+                                        CornerRadius="12"
+                                        Padding="16"
+                                        Margin="0,0,8,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Приложения и игры" Foreground="#8E8E9B" FontSize="12"/>
+                                        <TextBlock x:Name="RoutingApplicationsCountTextBlock"
+                                                   Text="0"
+                                                   Foreground="#FFFFFF"
+                                                   FontSize="24"
+                                                   FontWeight="SemiBold"
+                                                   Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Background="#14141B"
+                                        BorderBrush="#2A2A36"
+                                        BorderThickness="1"
+                                        CornerRadius="12"
+                                        Padding="16"
+                                        Margin="4,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Сайты" Foreground="#8E8E9B" FontSize="12"/>
+                                        <TextBlock x:Name="RoutingSitesCountTextBlock"
+                                                   Text="0"
+                                                   Foreground="#FFFFFF"
+                                                   FontSize="24"
+                                                   FontWeight="SemiBold"
+                                                   Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                                <Border Background="#14141B"
+                                        BorderBrush="#2A2A36"
+                                        BorderThickness="1"
+                                        CornerRadius="12"
+                                        Padding="16"
+                                        Margin="8,0,0,0">
+                                    <StackPanel>
+                                        <TextBlock Text="Включено правил" Foreground="#8E8E9B" FontSize="12"/>
+                                        <TextBlock x:Name="RoutingEnabledCountTextBlock"
+                                                   Text="0"
+                                                   Foreground="#72E3A8"
+                                                   FontSize="24"
+                                                   FontWeight="SemiBold"
+                                                   Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Border>
+                            </UniformGrid>
+
+                            <Border Background="#16161F"
+                                    BorderBrush="#292936"
+                                    BorderThickness="1"
+                                    CornerRadius="12"
+                                    Padding="18"
+                                    Margin="0,0,0,16">
+                                <StackPanel>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*"/>
+                                            <ColumnDefinition Width="Auto"/>
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="Приложения и игры"
+                                                       Foreground="#FFFFFF"
+                                                       FontSize="20"
+                                                       FontWeight="SemiBold"/>
+                                            <TextBlock Text="Каждая карточка может содержать основной EXE и найденные связанные процессы."
+                                                       Foreground="#777784"
+                                                       FontSize="12"
+                                                       TextWrapping="Wrap"
+                                                       Margin="0,5,0,0"/>
+                                        </StackPanel>
+                                    </Grid>
+                                    <TextBlock x:Name="RoutingApplicationsEmptyTextBlock"
+                                               Text="Приложения пока не добавлены."
+                                               Foreground="#777784"
+                                               Margin="0,16,0,4"/>
+                                    <StackPanel x:Name="RoutingApplicationsPanel" Margin="0,14,0,0"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Border Background="#16161F"
+                                    BorderBrush="#292936"
+                                    BorderThickness="1"
+                                    CornerRadius="12"
+                                    Padding="18"
+                                    Margin="0,0,0,16">
+                                <StackPanel>
+                                    <TextBlock Text="Сайты"
+                                               Foreground="#FFFFFF"
+                                               FontSize="20"
+                                               FontWeight="SemiBold"/>
+                                    <TextBlock Text="Можно включить несколько доменов одновременно; при необходимости учитываются все поддомены."
+                                               Foreground="#777784"
+                                               FontSize="12"
+                                               TextWrapping="Wrap"
+                                               Margin="0,5,0,0"/>
+                                    <TextBlock x:Name="RoutingSitesEmptyTextBlock"
+                                               Text="Сайты пока не добавлены."
+                                               Foreground="#777784"
+                                               Margin="0,16,0,4"/>
+                                    <StackPanel x:Name="RoutingSitesPanel" Margin="0,14,0,0"/>
+                                </StackPanel>
+                            </Border>
+
+                            <Grid Margin="0,0,0,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="12"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="12"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <Button Grid.Column="0"
+                                        Style="{StaticResource RoutingPrimaryButtonStyle}"
+                                        Content="Добавить приложение или игру"
+                                        Click="AddRoutingApplication_ClickAsync"/>
+                                <Button Grid.Column="2"
+                                        Style="{StaticResource RoutingButtonStyle}"
+                                        Content="Добавить сайт"
+                                        Click="AddRoutingSite_ClickAsync"/>
+                                <Button x:Name="ClearRoutingRegistryButton"
+                                        Grid.Column="4"
+                                        Style="{StaticResource RoutingDangerButtonStyle}"
+                                        Content="Удалить список"
+                                        IsEnabled="False"
+                                        Click="ClearRoutingRegistry_ClickAsync"/>
+                            </Grid>
+
+                            <Border Background="#14141B"
+                                    BorderBrush="#2A2A36"
+                                    BorderThickness="1"
+                                    CornerRadius="10"
+                                    Padding="14"
+                                    Margin="0,0,0,22">
+                                <TextBlock Text="MVP7.1.1 сохраняет защищённый список и группы EXE. Реальное выборочное направление трафика через активный профиль подключается следующим сетевым патчем."
+                                           Foreground="#858592"
+                                           FontSize="12"
+                                           TextWrapping="Wrap"/>
+                            </Border>
+                        </StackPanel>
+                    </ScrollViewer>
+                </Grid>
+            </TabItem>
+
             <TabItem Header="⚙  Настройки">
                 <Grid Background="#1E1E24">
                     <ScrollViewer VerticalScrollBarVisibility="Auto">

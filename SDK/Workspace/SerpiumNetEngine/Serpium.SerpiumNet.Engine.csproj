@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -9,7 +9,7 @@
 
     <AssemblyName>Serpium.SerpiumNet.Engine</AssemblyName>
     <RootNamespace>Serpium.SerpiumNet.Engine</RootNamespace>
-    <Version>0.4.3</Version>
+    <Version>0.5.2</Version>
 
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
     <GenerateDependencyFile>true</GenerateDependencyFile>
