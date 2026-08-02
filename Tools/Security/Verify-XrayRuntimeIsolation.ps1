@@ -1,12 +1,18 @@
 ﻿#requires -version 5.1
 [CmdletBinding()]
 param(
-    [string]$Root = "D:\Program\Serpium\SerpiumVPN",
+    [string]$Root,
     [int]$SocksPort = 10808
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    $Root = [IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot "..\..")
+    )
+}
 
 $rootPath = [IO.Path]::GetFullPath($Root)
 $localAppData = [IO.Path]::GetFullPath(

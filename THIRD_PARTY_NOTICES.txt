@@ -31,13 +31,22 @@ This file is provided for attribution and license visibility.
    Included/used for: WinDivert.dll / WinDivert64.sys packet interception driver/library, if present in this distribution.
    License file: licenses/LICENSE_WinDivert.txt
 
-Notes:
-- SerpiumVPN itself is a separate project and is not affiliated with Flowseal, bol-van, WinDivert, Telegram, YouTube, Discord, or Google.
-- The included third-party notices do not claim ownership over third-party projects.
-- If you remove a third-party component from the distribution, you may also remove the matching notice; if you add new third-party code or binaries, add their license/notice here.
+5. sing-box
+   Author/project: SagerNet/sing-box
+   License: GNU General Public License v3.0 or later
+   Source: https://github.com/SagerNet/sing-box
+   Included/used for: TUN, DNS and selective routing in Serpium Relay.
+   License file: licenses/LICENSE_sing-box_GPL-3.0-or-later.txt
 
-sing-box v1.13.15
-Copyright (C) 2022 nekohasekai and contributors
-License: GNU General Public License v3.0 or later
-Project: https://github.com/SagerNet/sing-box
-Local license copy: licenses/LICENSE_sing-box_GPL-3.0-or-later.txt
+6. Xray-core
+   Author/project: XTLS/Xray-core
+   License: Mozilla Public License Version 2.0
+   Source: https://github.com/XTLS/Xray-core
+   Included/used for: VLESS, VMess, Trojan, REALITY and SOCKS5 transports in Serpium Relay.
+   License file: licenses/LICENSE_Xray-core_MPL-2.0.txt
+   Source code: https://github.com/XTLS/Xray-core
+
+Notes:
+- SerpiumVPN itself is a separate project and is not affiliated with Flowseal, bol-van, WinDivert, SagerNet, XTLS, Telegram, YouTube, Discord, or Google.
+- The included third-party notices do not claim ownership over third-party projects.
+- If you remove a third-party component from the distribution, you may also remove the matching notice; if you add new third-party code or binaries, add its license and notice here.

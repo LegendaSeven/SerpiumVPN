@@ -1,29 +1,32 @@
-How to add licenses to the release folder
+SerpiumVPN release license payload
 
-Before building the Inno Setup installer, copy these files into D:\release:
+The SerpiumVPN project now copies THIRD_PARTY_NOTICES.txt and the complete
+licenses directory into build and publish output automatically.
 
-D:\release\THIRD_PARTY_NOTICES.txt
-D:\release\licenses\LICENSE_tg-ws-proxy.txt
-D:\release\licenses\LICENSE_zapret-discord-youtube.txt
-D:\release\licenses\LICENSE_zapret_bol-van.txt
-D:\release\licenses\LICENSE_WinDivert.txt
+Expected publish structure:
 
-Expected release structure:
-
-D:\release\
+publish\app\
   SerpiumVPN.exe
+  SerpiumUpdater.exe
   THIRD_PARTY_NOTICES.txt
   licenses\
     LICENSE_tg-ws-proxy.txt
     LICENSE_zapret-discord-youtube.txt
     LICENSE_zapret_bol-van.txt
     LICENSE_WinDivert.txt
+    LICENSE_sing-box_GPL-3.0-or-later.txt
+    LICENSE_Xray-core_MPL-2.0.txt
   bin_files\
     bin\
       winws.exe
       WinDivert.dll
       WinDivert64.sys
+    relay\
+      sing-box.exe
+      xray.exe
+      SerpiumNet.exe
     tgws\
       TgWsProxy_windows.exe
 
-Then build the installer using serpium_tgws_licenses.iss.
+Before publishing a release, verify that the notice and all applicable license
+files are present in publish\app and in the installer payload.

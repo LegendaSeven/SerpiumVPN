@@ -11,6 +11,8 @@
 
     [string]$GitHubRepo = "LegendaSeven/SerpiumVPN",
 
+    [string]$InnoCompiler,
+
     [switch]$Draft
 )
 
@@ -163,38 +165,108 @@ if (-not (Test-Path $InstallerScript)) {
     throw "Inno Setup script not found: $InstallerScript"
 }
 
-$isccCandidates = @(
-    "D:\Program\Inno Setup 6\ISCC.exe",
-    "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    "C:\Program Files\Inno Setup 6\ISCC.exe"
-)
+function Add-InnoCompilerCandidate {
+    param(
+        [System.Collections.ArrayList]$Candidates,
+        [string]$Path
+    )
 
-$compil32Candidates = @(
-    "D:\Program\Inno Setup 6\Compil32.exe",
-    "C:\Program Files (x86)\Inno Setup 6\Compil32.exe",
-    "C:\Program Files\Inno Setup 6\Compil32.exe"
-)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return
+    }
 
-$isccPath = $isccCandidates |
-    Where-Object { Test-Path $_ } |
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return
+    }
+
+    $fullPath = [IO.Path]::GetFullPath($Path)
+    if (-not $Candidates.Contains($fullPath)) {
+        [void]$Candidates.Add($fullPath)
+    }
+}
+
+function Get-InnoCompilerCandidates {
+    $candidates = New-Object System.Collections.ArrayList
+
+    Add-InnoCompilerCandidate $candidates $InnoCompiler
+    Add-InnoCompilerCandidate $candidates $env:INNO_SETUP_COMPILER
+
+    foreach ($commandName in @("ISCC.exe", "Compil32.exe")) {
+        $command = Get-Command $commandName -ErrorAction SilentlyContinue
+        if ($null -ne $command) {
+            Add-InnoCompilerCandidate $candidates $command.Source
+        }
+    }
+
+    foreach ($programRoot in @(
+        $env:ProgramFiles,
+        ${env:ProgramFiles(x86)}
+    )) {
+        if ([string]::IsNullOrWhiteSpace($programRoot)) {
+            continue
+        }
+
+        Add-InnoCompilerCandidate $candidates (
+            Join-Path $programRoot "Inno Setup 6\ISCC.exe"
+        )
+        Add-InnoCompilerCandidate $candidates (
+            Join-Path $programRoot "Inno Setup 6\Compil32.exe"
+        )
+    }
+
+    $registryKeys = @(
+        "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+        "HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1",
+        "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Inno Setup 6_is1"
+    )
+
+    foreach ($registryKey in $registryKeys) {
+        try {
+            $installLocation = (
+                Get-ItemProperty -LiteralPath $registryKey -ErrorAction Stop
+            ).InstallLocation
+
+            if ([string]::IsNullOrWhiteSpace($installLocation)) {
+                continue
+            }
+
+            Add-InnoCompilerCandidate $candidates (
+                Join-Path $installLocation "ISCC.exe"
+            )
+            Add-InnoCompilerCandidate $candidates (
+                Join-Path $installLocation "Compil32.exe"
+            )
+        }
+        catch {
+        }
+    }
+
+    return @($candidates)
+}
+
+$innoCompilerPath = Get-InnoCompilerCandidates |
     Select-Object -First 1
 
-$compil32Path = $compil32Candidates |
-    Where-Object { Test-Path $_ } |
-    Select-Object -First 1
+if ([string]::IsNullOrWhiteSpace($innoCompilerPath)) {
+    throw (
+        "Inno Setup compiler was not found. Add ISCC.exe to PATH, " +
+        "set INNO_SETUP_COMPILER, or pass -InnoCompiler <path>."
+    )
+}
 
-if ($isccPath) {
-    Write-Host "Using ISCC: $isccPath"
-    & $isccPath "/DMyAppVersion=$Version" $InstallerScript
+$innoCompilerName = [IO.Path]::GetFileName($innoCompilerPath)
+
+if ($innoCompilerName.Equals(
+        "ISCC.exe",
+        [StringComparison]::OrdinalIgnoreCase)) {
+    Write-Host "Using ISCC: $innoCompilerPath"
+    & $innoCompilerPath "/DMyAppVersion=$Version" $InstallerScript
     Assert-NativeSuccess "Inno Setup ISCC"
 }
-elseif ($compil32Path) {
-    Write-Host "Using Compil32: $compil32Path"
-    & $compil32Path /cc "/DMyAppVersion=$Version" $InstallerScript
-    Assert-NativeSuccess "Inno Setup Compil32"
-}
 else {
-    throw "Inno Setup compiler not found. Expected ISCC.exe or Compil32.exe in D:\Program\Inno Setup 6 or Program Files."
+    Write-Host "Using Compil32: $innoCompilerPath"
+    & $innoCompilerPath /cc "/DMyAppVersion=$Version" $InstallerScript
+    Assert-NativeSuccess "Inno Setup Compil32"
 }
 
 $rawInstaller = Join-Path $InstallerDir "SerpiumVPN_Setup.exe"

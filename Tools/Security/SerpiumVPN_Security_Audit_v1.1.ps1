@@ -1,11 +1,17 @@
 ﻿#requires -version 5.1
 [CmdletBinding()]
 param(
-    [string]$Root = "D:\Program\Serpium\SerpiumVPN"
+    [string]$Root
 )
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    $Root = [IO.Path]::GetFullPath(
+        (Join-Path $PSScriptRoot "..\..")
+    )
+}
 
 $projectRoot = [IO.Path]::GetFullPath($Root)
 $desktop = [Environment]::GetFolderPath("Desktop")

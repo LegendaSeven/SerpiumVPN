@@ -49,6 +49,17 @@
 		<None Update=".github\workflows\release.yml" Link="GitHub Actions\release.yml" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<None Update="THIRD_PARTY_NOTICES.txt">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
+		<None Update="licenses\**\*">
+			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+		</None>
+	</ItemGroup>
+
 	<Target Name="BuildSampleEnginePackage"
 			AfterTargets="Build"
 			Condition="'$(BuildSampleEngine)' == 'true'">

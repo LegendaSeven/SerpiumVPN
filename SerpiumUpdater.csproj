@@ -6,7 +6,12 @@
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<AssemblyName>SerpiumUpdater</AssemblyName>
-		<Version>1.0.10</Version>
+		<AssemblyVersion>1.0.56.4</AssemblyVersion>
+		<FileVersion>1.0.56.4</FileVersion>
+		<Version>1.0.56.4</Version>
+		<VersionPrefix>1.0.56.4</VersionPrefix>
+		<VersionSuffix></VersionSuffix>
+		<InformationalVersion>1.0.56.4</InformationalVersion>
 	</PropertyGroup>
 
 </Project>

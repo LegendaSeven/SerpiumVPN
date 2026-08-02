@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Security.Cryptography;
 using System.Text;
@@ -251,7 +252,9 @@ internal static class AvoProviderJsonSchemaInspector
         return controlCharacters == 0 ? "text" : "opaque-text";
     }
 
-    private static bool TryParseJsonText(string value, out JsonDocument? document)
+    private static bool TryParseJsonText(
+        string value,
+        [NotNullWhen(true)] out JsonDocument? document)
     {
         document = null;
         string trimmed = value.TrimStart();
@@ -271,7 +274,9 @@ internal static class AvoProviderJsonSchemaInspector
         }
     }
 
-    private static bool TryParseJsonBytes(byte[] bytes, out JsonDocument? document)
+    private static bool TryParseJsonBytes(
+        byte[] bytes,
+        [NotNullWhen(true)] out JsonDocument? document)
     {
         document = null;
         if (bytes.Length < 2)
