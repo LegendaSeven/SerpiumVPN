@@ -134,40 +134,77 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
 
     public void DeleteBestEffort()
     {
-        try
+        for (int attempt = 0; attempt < 6; attempt++)
         {
-            if (File.Exists(RuleSetPath))
-            {
-                File.SetAttributes(RuleSetPath, FileAttributes.Normal);
-                File.Delete(RuleSetPath);
-            }
+            bool residueRemains = false;
 
-            if (Directory.Exists(RuntimeDirectory))
+            try
             {
-                foreach (string temporaryPath in Directory.EnumerateFiles(
-                    RuntimeDirectory,
-                    RuleSetFileName + ".*.tmp",
-                    SearchOption.TopDirectoryOnly))
+                if (File.Exists(RuleSetPath))
                 {
-                    try
-                    {
-                        File.SetAttributes(temporaryPath, FileAttributes.Normal);
-                        File.Delete(temporaryPath);
-                    }
-                    catch { }
+                    File.SetAttributes(
+                        RuleSetPath,
+                        FileAttributes.Normal);
+                    File.Delete(RuleSetPath);
                 }
 
-                if (!Directory.EnumerateFileSystemEntries(RuntimeDirectory).Any())
-                    Directory.Delete(RuntimeDirectory, recursive: false);
+                if (Directory.Exists(RuntimeDirectory))
+                {
+                    foreach (string temporaryPath in
+                        Directory.EnumerateFiles(
+                            RuntimeDirectory,
+                            RuleSetFileName + ".*.tmp",
+                            SearchOption.TopDirectoryOnly).ToArray())
+                    {
+                        try
+                        {
+                            File.SetAttributes(
+                                temporaryPath,
+                                FileAttributes.Normal);
+                            File.Delete(temporaryPath);
+                        }
+                        catch (IOException)
+                        {
+                            residueRemains = true;
+                        }
+                        catch (UnauthorizedAccessException)
+                        {
+                            residueRemains = true;
+                        }
+                    }
+
+                    residueRemains =
+                        residueRemains ||
+                        File.Exists(RuleSetPath) ||
+                        Directory.EnumerateFiles(
+                            RuntimeDirectory,
+                            RuleSetFileName + ".*",
+                            SearchOption.TopDirectoryOnly).Any();
+
+                    if (!residueRemains &&
+                        !Directory.EnumerateFileSystemEntries(
+                            RuntimeDirectory).Any())
+                    {
+                        Directory.Delete(
+                            RuntimeDirectory,
+                            recursive: false);
+                    }
+                }
+
+                if (!residueRemains)
+                    return;
             }
-        }
-        catch (IOException)
-        {
-            // The active sing-box watcher may briefly hold a handle.
-        }
-        catch (UnauthorizedAccessException)
-        {
-            // Startup cleanup retries under the normal application identity.
+            catch (IOException)
+            {
+                residueRemains = true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                residueRemains = true;
+            }
+
+            if (residueRemains && attempt < 5)
+                Thread.Sleep(100);
         }
     }
 

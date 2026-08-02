@@ -443,16 +443,44 @@ public sealed class SerpiumXraySessionManager : IDisposable
 
     private void DeleteStateFile()
     {
-        if (string.IsNullOrWhiteSpace(_statePath))
-            return;
-        try { File.Delete(_statePath); } catch { }
+        DeleteFileWithRetry(_statePath);
     }
 
     private void DeleteConfigFile()
     {
-        if (string.IsNullOrWhiteSpace(_configPath))
+        DeleteFileWithRetry(_configPath);
+    }
+
+    private static void DeleteFileWithRetry(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
             return;
-        try { File.Delete(_configPath); } catch { }
+
+        for (int attempt = 0; attempt < 6; attempt++)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    return;
+
+                File.SetAttributes(path, FileAttributes.Normal);
+                File.Delete(path);
+
+                if (!File.Exists(path))
+                    return;
+            }
+            catch (IOException)
+            {
+                // Exited/stop handlers may briefly race on the same file.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // Retry after the process releases its final handles.
+            }
+
+            if (attempt < 5)
+                Thread.Sleep(80);
+        }
     }
 
     private void SetState(RelayGatewayState state)

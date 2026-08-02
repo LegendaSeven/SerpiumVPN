@@ -25,7 +25,8 @@ public static class RelayLifecycleRecovery
         Path.Combine("configs", "key-client.json.tmp"),
         Path.Combine("state", "sing-box-tun-process.json"),
         Path.Combine("state", "xray-client-process.json"),
-        Path.Combine("state", "xray-process.json")
+        Path.Combine("state", "xray-process.json"),
+        Path.Combine("state", "key-client-process.json")
     ];
 
     public static async Task<RelayLifecycleCleanupResult> CleanupOwnedRuntimeAsync(
@@ -72,7 +73,7 @@ public static class RelayLifecycleRecovery
         }
 
         int filesDeleted = DeleteGeneratedSecrets(applicationBaseDirectory);
-        filesDeleted += DeleteDynamicRoutingRuleSet();
+        filesDeleted += await DeletePrivateRuntimeResidueWithRetryAsync(cancellationToken).ConfigureAwait(false);
         return new RelayLifecycleCleanupResult(processesStopped, filesDeleted);
     }
 
@@ -108,6 +109,115 @@ public static class RelayLifecycleRecovery
         return deleted;
     }
 
+    private static async Task<int> DeletePrivateRuntimeResidueWithRetryAsync(
+        CancellationToken cancellationToken)
+    {
+        int deleted = 0;
+
+        for (int attempt = 0; attempt < 6; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            deleted += DeletePrivateXrayRuntimeFiles();
+            deleted += DeleteDynamicRoutingRuleSet();
+
+            if (!HasPrivateRuntimeResidue())
+                break;
+
+            if (attempt < 5)
+            {
+                await Task.Delay(100, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+        }
+
+        return deleted;
+    }
+
+    private static int DeletePrivateXrayRuntimeFiles()
+    {
+        string runtimeRoot = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "SerpiumVPN",
+            "Runtime");
+
+        string[] paths =
+        [
+            Path.Combine(runtimeRoot, "Xray", "key-client.json"),
+            Path.Combine(runtimeRoot, "state", "key-client-process.json")
+        ];
+
+        int deleted = 0;
+
+        foreach (string path in paths)
+        {
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
+
+                File.SetAttributes(path, FileAttributes.Normal);
+                File.Delete(path);
+
+                if (!File.Exists(path))
+                    deleted++;
+            }
+            catch (IOException)
+            {
+                // The manager/Exited callback may still be releasing the file.
+            }
+            catch (UnauthorizedAccessException)
+            {
+                // A later retry runs under the same application identity.
+            }
+        }
+
+        TryDeleteEmptyDirectory(Path.Combine(runtimeRoot, "Xray"));
+        TryDeleteEmptyDirectory(Path.Combine(runtimeRoot, "state"));
+
+        return deleted;
+    }
+
+    private static bool HasPrivateRuntimeResidue()
+    {
+        string runtimeRoot = Path.Combine(
+            Environment.GetFolderPath(
+                Environment.SpecialFolder.LocalApplicationData),
+            "SerpiumVPN",
+            "Runtime");
+
+        if (File.Exists(
+                Path.Combine(runtimeRoot, "Xray", "key-client.json")) ||
+            File.Exists(
+                Path.Combine(
+                    runtimeRoot,
+                    "state",
+                    "key-client-process.json")))
+        {
+            return true;
+        }
+
+        string routingDirectory = Path.Combine(runtimeRoot, "Routing");
+        if (!Directory.Exists(routingDirectory))
+            return false;
+
+        try
+        {
+            return Directory.EnumerateFiles(
+                routingDirectory,
+                "serpium-routing-live.json*",
+                SearchOption.TopDirectoryOnly).Any();
+        }
+        catch (IOException)
+        {
+            return true;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return true;
+        }
+    }
     private static int DeleteDynamicRoutingRuleSet()
     {
         string runtimeDirectory = Path.Combine(
