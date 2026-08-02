@@ -1,35 +1,67 @@
-﻿# Build outputs
-/bin/
-/obj/
-/publish/
-
-# Visual Studio state
-/.vs/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
-
-# Local runtime data
-/bin_files/logs/
-/bin_files/tgws/TgWsProxy_data/
-/bin_files/tgws/telegram_proxy_link.txt
-
-# Publish profile user state
-/Properties/PublishProfiles/*.pubxml.user
-
-# Packages and archives
-*.nupkg
-*.snupkg
-*.zip
-*.7z
-*.rar
-
-# Logs
-*.log
-
-# SerpiumUpdater build outputs
-/SerpiumUpdater/bin/
+# Build outputs
+
+/bin/
+
+/obj/
+
+/publish/
+
+
+
+# Visual Studio state
+
+/.vs/
+
+*.user
+
+*.suo
+
+*.userosscache
+
+*.sln.docstates
+
+
+
+# Local runtime data
+
+/bin_files/logs/
+
+/bin_files/tgws/TgWsProxy_data/
+
+/bin_files/tgws/telegram_proxy_link.txt
+
+
+
+# Publish profile user state
+
+/Properties/PublishProfiles/*.pubxml.user
+
+
+
+# Packages and archives
+
+*.nupkg
+
+*.snupkg
+
+*.zip
+
+*.7z
+
+*.rar
+
+
+
+# Logs
+
+*.log
+
+
+
+# SerpiumUpdater build outputs
+
+/SerpiumUpdater/bin/
+
 /SerpiumUpdater/obj/
 
 # BEGIN SERPIUM LOCAL/PRIVATE EXCLUDES
@@ -146,3 +178,20 @@ appsettings.local.json
 /Security_Audit/
 /TestResults/
 # END SERPIUM SECURITY SAFE POINT
+# ------------------------------------------------------------------
+# SerpiumVPN generated and local runtime files
+# Added by Cleanup Stage 1
+# ------------------------------------------------------------------
+.vs/
+.review_obj/
+publish/
+**/bin/
+**/obj/
+!bin_files/bin/
+!bin_files/bin/**
+Engines/SampleEngine/Build/
+*.user
+*.suo
+bin_files/relay/state/*
+!bin_files/relay/state/.gitkeep
+bin_files/lists/*.backup
