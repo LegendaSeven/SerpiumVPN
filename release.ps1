@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$')]
+    [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?(-[0-9A-Za-z.-]+)?$')]
     [string]$Version,
 
     [string]$Runtime = "win-x64",
