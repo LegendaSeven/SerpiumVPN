@@ -111,6 +111,10 @@ dotnet publish $ProjectFile `
     -c Release `
     -r $Runtime `
     --self-contained $selfContainedValue `
+    -p:DebugType=None `
+    -p:DebugSymbols=false `
+    -p:ContinuousIntegrationBuild=true `
+    "-p:PathMap=$ProjectRoot=/_/SerpiumVPN" `
     -p:Version=$Version `
     -p:AssemblyVersion=$assemblyVersion `
     -p:FileVersion=$assemblyVersion `
@@ -126,6 +130,8 @@ dotnet publish $UpdaterProjectFile `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:DebugType=None `
     -p:DebugSymbols=false `
+    -p:ContinuousIntegrationBuild=true `
+    "-p:PathMap=$ProjectRoot=/_/SerpiumVPN" `
     -p:Version=$Version `
     -p:AssemblyVersion=$assemblyVersion `
     -p:FileVersion=$assemblyVersion `
