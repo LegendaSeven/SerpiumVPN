@@ -11,6 +11,10 @@ namespace SerpiumVPN
         public bool AutoSwitchStrategies { get; set; } = false;
         public bool AutoUpdateFiles { get; set; } = true;
         public bool AutoUpdateProgram { get; set; } = true;
+        public bool AutoCheckRelayComponents { get; set; } = true;
+        public DateTimeOffset? LastRelayComponentCheckUtc { get; set; }
+        public string? LastKnownSingBoxRelease { get; set; }
+        public string? LastKnownXrayRelease { get; set; }
         public bool AutoStartLastStrategy { get; set; } = false;
         public string? LastStrategyName { get; set; }
         public DateTime? LastStrategySavedAt { get; set; }

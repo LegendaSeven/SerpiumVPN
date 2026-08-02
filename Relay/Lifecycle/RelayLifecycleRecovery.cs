@@ -72,6 +72,7 @@ public static class RelayLifecycleRecovery
         }
 
         int filesDeleted = DeleteGeneratedSecrets(applicationBaseDirectory);
+        filesDeleted += DeleteDynamicRoutingRuleSet();
         return new RelayLifecycleCleanupResult(processesStopped, filesDeleted);
     }
 
@@ -104,6 +105,44 @@ public static class RelayLifecycleRecovery
         }
 
         TryDeleteEmptyDirectory(Path.Combine(relayDirectory, "configs"));
+        return deleted;
+    }
+
+    private static int DeleteDynamicRoutingRuleSet()
+    {
+        string runtimeDirectory = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "SerpiumVPN",
+            "Runtime",
+            "Routing");
+        int deleted = 0;
+
+        try
+        {
+            if (!Directory.Exists(runtimeDirectory))
+                return 0;
+
+            foreach (string path in Directory.EnumerateFiles(
+                runtimeDirectory,
+                "serpium-routing-live.json*",
+                SearchOption.TopDirectoryOnly))
+            {
+                try
+                {
+                    File.SetAttributes(path, FileAttributes.Normal);
+                    File.Delete(path);
+                    if (!File.Exists(path))
+                        deleted++;
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+
+            TryDeleteEmptyDirectory(runtimeDirectory);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
+
         return deleted;
     }
 

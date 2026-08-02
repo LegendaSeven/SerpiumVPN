@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Diagnostics;
 using System.IO;
@@ -24,6 +25,7 @@ using Clipboard = System.Windows.Clipboard;
 using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
 using SerpiumVPN.Relay;
 using SerpiumVPN.Relay.Diagnostics;
+using SerpiumVPN.Relay.Components;
 using SerpiumVPN.Relay.Lifecycle;
 using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.Providers;
@@ -64,6 +66,9 @@ namespace SerpiumVPN
         private readonly SecureXraySessionManager _serpiumXraySessionManager = new();
         private readonly SecureProfileVault _secureProfileVault = new();
         private readonly SecureRoutingRegistry _secureRoutingRegistry = new();
+        private readonly SecureRoutingRuleSetRuntime _routingRuleSetRuntime = new();
+        private readonly RelayComponentManager _relayComponentManager = new();
+        private RelayComponentSettingsWindow? _relayComponentSettingsWindow;
         private IReadOnlyList<RoutingRegistryEntry> _routingRegistryEntries =
             Array.Empty<RoutingRegistryEntry>();
         private bool _routingRegistryOperationInProgress;
@@ -75,6 +80,13 @@ namespace SerpiumVPN
             Array.Empty<SecureProfileVaultEntry>();
         private Guid? _activeSavedProfileId;
         private int? _activeSavedProfileSocksPort;
+        private bool _activeSavedProfileUsesRoutingTun;
+        private bool _activeRoutingHotReloadEnabled;
+        private int _activeSavedProfileRoutingRuleCount;
+        private IReadOnlyDictionary<Guid, string> _activeSavedProfileRoutingRuleLabels =
+            new Dictionary<Guid, string>();
+        private IReadOnlyDictionary<Guid, long> _activeSavedProfileRoutingRuleVersions =
+            new Dictionary<Guid, long>();
         private bool _savedProfileOperationInProgress;
         private bool _relayLifecycleCheckInProgress;
         private Guid? _failedSavedProfileId;
@@ -206,6 +218,9 @@ namespace SerpiumVPN
 
             if (_settings.AutoUpdateProgram)
                 await CheckAppUpdatesAsync(showSuccessMessage: false);
+
+            if (_settings.AutoCheckRelayComponents)
+                _ = CheckRelayComponentsInBackgroundAsync();
 
             await RestoreSavedStrategyAsync();
         }
@@ -609,12 +624,26 @@ namespace SerpiumVPN
                         : string.Empty;
 
                     UpdateFilesStatus("Файлы обновлены", true);
-                    MessageBox.Show(
-                        "Файлы успешно обновлены:" + Environment.NewLine + details + skippedDetails,
-                        "Обновления",
-                        MessageBoxButton.OK,
-                        summary.SkippedFiles.Count > 0 ? MessageBoxImage.Warning : MessageBoxImage.Information
-                    );
+
+                    string noticeBody =
+                        details + skippedDetails;
+
+                    SerpiumNoticeDialog.Show(
+                        this,
+                        "Обновления Zapret",
+                        summary.SkippedFiles.Count > 0
+                            ? "Компоненты обновлены частично"
+                            : "Компоненты Zapret обновлены",
+                        summary.SkippedFiles.Count > 0
+                            ? "Основные файлы обновлены, но часть занятых Windows файлов была пропущена."
+                            : "Локальные компоненты успешно скачаны, проверены и заменены.",
+                        noticeBody,
+                        summary.SkippedFiles.Count > 0
+                            ? "После перезагрузки ПК повторите проверку до запуска обхода."
+                            : "Компоненты Zapret готовы к работе.",
+                        summary.SkippedFiles.Count > 0
+                            ? SerpiumNoticeKind.Warning
+                            : SerpiumNoticeKind.Success);
 
                     LoadHostsList();
                 }
@@ -624,12 +653,14 @@ namespace SerpiumVPN
 
                     if (showSuccessMessage)
                     {
-                        MessageBox.Show(
-                            "Обновлений нет. Все нужные файлы уже актуальны.",
-                            "Обновления",
-                            MessageBoxButton.OK,
-                            MessageBoxImage.Information
-                        );
+                        SerpiumNoticeDialog.Show(
+                            this,
+                            "Обновления Zapret",
+                            "Компоненты уже актуальны",
+                            "Новых стабильных файлов для Zapret не обнаружено.",
+                            "Все установленные компоненты соответствуют последним доступным версиям.",
+                            "Дополнительных действий не требуется.",
+                            SerpiumNoticeKind.Information);
                     }
                 }
             }
@@ -639,12 +670,14 @@ namespace SerpiumVPN
 
                 if (showSuccessMessage)
                 {
-                    MessageBox.Show(
-                        $"Не удалось проверить или установить обновления: {ex.Message}",
-                        "Обновления",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning
-                    );
+                    SerpiumNoticeDialog.Show(
+                        this,
+                        "Обновления Zapret",
+                        "Не удалось обновить компоненты",
+                        "Проверка или установка файлов завершилась ошибкой.",
+                        ex.Message,
+                        "Рабочие файлы, которые не удалось заменить, остаются без изменений.",
+                        SerpiumNoticeKind.Warning);
                 }
                 else
                 {
@@ -727,6 +760,75 @@ namespace SerpiumVPN
         private void OpenRelayPage_Click(object sender, RoutedEventArgs e)
         {
             MainNavigationTabs.SelectedIndex = 2;
+        }
+
+        private void OpenRelayComponentSettings_Click(object sender, RoutedEventArgs e)
+        {
+            if (_relayComponentSettingsWindow is not null)
+            {
+                if (_relayComponentSettingsWindow.WindowState == WindowState.Minimized)
+                    _relayComponentSettingsWindow.WindowState = WindowState.Normal;
+
+                _relayComponentSettingsWindow.Activate();
+                return;
+            }
+
+            RelayComponentSettingsWindow window = new(
+                _relayComponentManager,
+                _settings,
+                summary => SafeDispatcherInvoke(() =>
+                    RelayComponentSettingsButton.ToolTip = summary),
+                StopAllRelayTransportsBestEffortAsync)
+            {
+                Owner = this
+            };
+
+            _relayComponentSettingsWindow = window;
+            window.Closed += (_, _) => _relayComponentSettingsWindow = null;
+            window.Show();
+        }
+
+        private async Task CheckRelayComponentsInBackgroundAsync()
+        {
+            try
+            {
+                if (_settings.LastRelayComponentCheckUtc is DateTimeOffset lastCheck &&
+                    DateTimeOffset.UtcNow - lastCheck < TimeSpan.FromHours(12))
+                {
+                    return;
+                }
+
+                IReadOnlyDictionary<RelayComponentKind, RelayComponentReleaseInfo> releases =
+                    await _relayComponentManager.CheckLatestStableReleasesAsync();
+                IReadOnlyDictionary<RelayComponentKind, RelayComponentSnapshot> snapshots =
+                    await _relayComponentManager.InspectAllAsync();
+
+                _settings.LastRelayComponentCheckUtc = DateTimeOffset.UtcNow;
+                _settings.LastKnownSingBoxRelease =
+                    releases[RelayComponentKind.SingBox].TagName;
+                _settings.LastKnownXrayRelease =
+                    releases[RelayComponentKind.XrayCore].TagName;
+                _settings.Save();
+
+                int updateCount = snapshots.Values.Count(snapshot =>
+                    releases.TryGetValue(snapshot.Kind, out RelayComponentReleaseInfo? release) &&
+                    RelayComponentManager.IsUpdateAvailable(
+                        snapshot.InstalledVersion,
+                        release.NormalizedVersion));
+
+                string tooltip = updateCount > 0
+                    ? $"Компоненты Relay: официальных релизов новее — {updateCount}."
+                    : "Компоненты Relay: новых стабильных релизов не обнаружено.";
+
+                SafeDispatcherInvoke(() =>
+                    RelayComponentSettingsButton.ToolTip = tooltip);
+            }
+            catch
+            {
+                SafeDispatcherInvoke(() =>
+                    RelayComponentSettingsButton.ToolTip =
+                        "Компоненты Relay: автоматическая проверка временно недоступна.");
+            }
         }
 
         private void Settings_Click(object sender, RoutedEventArgs e)
@@ -1545,6 +1647,7 @@ namespace SerpiumVPN
                 DisposeValidatedProviderRuntimeProfile();
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
+                ClearActiveRoutingSnapshot();
                 ClearSavedProfileFailure();
                 _currentProviderProfileSaved = false;
                 ButtonSaveRelayProfile.Content = "Сохранить профиль";
@@ -1552,6 +1655,8 @@ namespace SerpiumVPN
                 RelayClientSocksStateTextBlock.Foreground = WpfBrushes.Gray;
                 RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 UpdateRelayClientUi();
+                UpdateRoutingSummaryStatus();
+                RenderRoutingRegistryCards();
                 await RefreshSecureProfileVaultStatusAsync();
 
                 if (stopError is not null)
@@ -1578,10 +1683,14 @@ namespace SerpiumVPN
                                   _serpiumSingBoxSessionManager.HasLiveProcess;
             bool isBusy = xrayBusy || singBoxBusy;
             bool isRunning = xrayRunning || singBoxRunning;
+            bool xrayRoutingBridgeMode =
+                _activeSavedProfileUsesRoutingTun &&
+                _validatedRelayProfile is not null;
             bool providerMode =
-                _validatedProviderRuntimeProfile is not null ||
-                singBoxState != RelayGatewayState.Stopped ||
-                singBoxRunning;
+                !xrayRoutingBridgeMode &&
+                (_validatedProviderRuntimeProfile is not null ||
+                 singBoxState != RelayGatewayState.Stopped ||
+                 singBoxRunning);
 
             ButtonStartRelayClient.IsEnabled = !isBusy && !isRunning;
             ButtonStopRelayClient.IsEnabled = isBusy || isRunning ||
@@ -1598,24 +1707,46 @@ namespace SerpiumVPN
             RelayClientKeyTextBox.IsReadOnly = isBusy || isRunning;
             RelayClientSocksPortTextBox.IsEnabled = !providerMode && !isBusy && !isRunning;
 
-            RelayGatewayState visibleState = providerMode ? singBoxState : xrayState;
-            RelayClientStateTextBlock.Text = providerMode
+            RelayGatewayState visibleState = xrayRoutingBridgeMode
+                ? (xrayState == RelayGatewayState.Failed ||
+                   singBoxState == RelayGatewayState.Failed
+                    ? RelayGatewayState.Failed
+                    : xrayState == RelayGatewayState.Stopping ||
+                      singBoxState == RelayGatewayState.Stopping
+                        ? RelayGatewayState.Stopping
+                        : xrayState == RelayGatewayState.Running &&
+                          singBoxState == RelayGatewayState.Running
+                            ? RelayGatewayState.Running
+                            : RelayGatewayState.Starting)
+                : providerMode
+                    ? singBoxState
+                    : xrayState;
+            RelayClientStateTextBlock.Text = xrayRoutingBridgeMode
                 ? visibleState switch
                 {
-                    RelayGatewayState.Starting => "sing-box: запускается…",
-                    RelayGatewayState.Running => "sing-box: работает",
-                    RelayGatewayState.Stopping => "sing-box: останавливается…",
-                    RelayGatewayState.Failed => "sing-box: ошибка",
-                    _ => "sing-box: остановлен"
+                    RelayGatewayState.Starting => "Xray + TUN: запускаются…",
+                    RelayGatewayState.Running => "Xray + TUN: работают",
+                    RelayGatewayState.Stopping => "Xray + TUN: останавливаются…",
+                    RelayGatewayState.Failed => "Xray + TUN: ошибка",
+                    _ => "Xray + TUN: остановлены"
                 }
-                : visibleState switch
-                {
-                    RelayGatewayState.Starting => "Xray: запускается…",
-                    RelayGatewayState.Running => "Xray: работает",
-                    RelayGatewayState.Stopping => "Xray: останавливается…",
-                    RelayGatewayState.Failed => "Xray: ошибка",
-                    _ => "Xray: остановлен"
-                };
+                : providerMode
+                    ? visibleState switch
+                    {
+                        RelayGatewayState.Starting => "sing-box: запускается…",
+                        RelayGatewayState.Running => "sing-box: работает",
+                        RelayGatewayState.Stopping => "sing-box: останавливается…",
+                        RelayGatewayState.Failed => "sing-box: ошибка",
+                        _ => "sing-box: остановлен"
+                    }
+                    : visibleState switch
+                    {
+                        RelayGatewayState.Starting => "Xray: запускается…",
+                        RelayGatewayState.Running => "Xray: работает",
+                        RelayGatewayState.Stopping => "Xray: останавливается…",
+                        RelayGatewayState.Failed => "Xray: ошибка",
+                        _ => "Xray: остановлен"
+                    };
 
             RelayClientStateTextBlock.Foreground = visibleState switch
             {
@@ -2037,6 +2168,22 @@ namespace SerpiumVPN
                     WpfBrushes.DeepSkyBlue);
                 RelayClientLogTextBox.Clear();
 
+                _routingRegistryEntries = await _secureRoutingRegistry.ListAsync();
+                RoutingRegistryEntry[] enabledRoutingEntries = _routingRegistryEntries
+                    .Where(item => item.IsEnabled)
+                    .ToArray();
+                int enabledRoutingRuleCount = enabledRoutingEntries.Length;
+                bool enableLiveRouting = _routingRegistryEntries.Count > 0;
+                if (enableLiveRouting)
+                {
+                    await _routingRuleSetRuntime.UpdateAsync(_routingRegistryEntries);
+                }
+                else
+                {
+                    _routingRuleSetRuntime.DeleteBestEffort();
+                }
+                RenderRoutingRegistryCards();
+
                 if (string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase))
                 {
                     DisposeValidatedProviderRuntimeProfile();
@@ -2058,20 +2205,70 @@ namespace SerpiumVPN
                         savedXray.Profile,
                         savedXray.SocksPort);
 
+                    ClearActiveRoutingSnapshot();
+                    if (enableLiveRouting)
+                    {
+                        RelayClientSocksStateTextBlock.Text =
+                            "Xray готов; запускаем выборочный TUN…";
+
+                        _validatedProviderRuntimeProfile =
+                            SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(
+                                profileId,
+                                savedXray.SocksPort,
+                                _routingRegistryEntries,
+                                _routingRuleSetRuntime.RuleSetPath);
+
+                        string singBoxPath = IOPath.Combine(relayDir, "sing-box.exe");
+                        SingBoxCheckResult routingCheck =
+                            await _singBoxValidationService.ValidateAsync(
+                                singBoxPath,
+                                _validatedProviderRuntimeProfile);
+                        if (!routingCheck.Success)
+                        {
+                            throw new InvalidOperationException(
+                                "sing-box отклонил выборочную маршрутизацию: " +
+                                routingCheck.Message);
+                        }
+
+                        await _serpiumSingBoxSessionManager.StartAsync(
+                            singBoxPath,
+                            _validatedProviderRuntimeProfile);
+
+                        _activeSavedProfileUsesRoutingTun = true;
+                        _activeRoutingHotReloadEnabled = true;
+                        CaptureActiveRoutingSnapshot(enabledRoutingEntries);
+                    }
+                    else
+                    {
+                        ClearActiveRoutingSnapshot();
+                    }
+
                     _activeSavedProfileId = profileId;
                     ClearSavedProfileFailure();
                     _currentProviderProfileSaved = true;
                     RelayDetectedProfileTextBlock.Text =
                         BuildRelayProfileSummary(savedXray.Profile) +
                         Environment.NewLine + Environment.NewLine +
-                        "Профиль загружен из Serpium Secure Profile Vault.";
-                    RelayClientSocksStateTextBlock.Text =
-                        $"SOCKS5: активен (127.0.0.1:{savedXray.SocksPort})";
+                        "Профиль загружен из Serpium Secure Profile Vault." +
+                        (enableLiveRouting
+                            ? Environment.NewLine +
+                              $"Выборочная маршрутизация активна: правил {enabledRoutingRuleCount}; " +
+                              "остальной трафик идёт напрямую."
+                            : Environment.NewLine +
+                              "SOCKS5 запущен без TUN: включите правила маршрутизации " +
+                              "и переподключите профиль.");
+                    RelayClientSocksStateTextBlock.Text = enableLiveRouting
+                        ? $"TUN → SOCKS5 активны (127.0.0.1:{savedXray.SocksPort})"
+                        : $"SOCKS5: активен (127.0.0.1:{savedXray.SocksPort})";
                     RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
                     SetRelayStatus(
-                        $"Статус: сохранённый профиль подключён через Xray — " +
-                        $"{savedXray.Profile.Protocol.ToUpperInvariant()}, " +
-                        $"SOCKS5 127.0.0.1:{savedXray.SocksPort}.",
+                        enableLiveRouting
+                            ? $"Статус: Xray подключён; выборочный TUN применил " +
+                              $"{enabledRoutingRuleCount} правил; live reload включён, " +
+                              "остальной трафик direct."
+                            : $"Статус: сохранённый профиль подключён через Xray — " +
+                              $"{savedXray.Profile.Protocol.ToUpperInvariant()}, " +
+                              $"SOCKS5 127.0.0.1:{savedXray.SocksPort}.",
                         WpfBrushes.LightGreen);
                 }
                 else
@@ -2079,19 +2276,67 @@ namespace SerpiumVPN
                     _validatedRelayProfile = null;
                     _activeSavedProfileSocksPort = null;
                     DisposeValidatedProviderRuntimeProfile();
-                    _validatedProviderRuntimeProfile =
+                    ProviderRuntimeProfile openedProviderProfile =
                         await _secureProfileVault.OpenProviderProfileAsync(profileId);
+                    try
+                    {
+                        _validatedProviderRuntimeProfile = enableLiveRouting
+                            ? SerpiumRoutingConfigCompiler.CompileProviderProfile(
+                                openedProviderProfile,
+                                _routingRegistryEntries,
+                                _routingRuleSetRuntime.RuleSetPath)
+                            : openedProviderProfile;
+
+                        if (!ReferenceEquals(
+                                _validatedProviderRuntimeProfile,
+                                openedProviderProfile))
+                        {
+                            openedProviderProfile.Dispose();
+                        }
+                    }
+                    catch
+                    {
+                        openedProviderProfile.Dispose();
+                        throw;
+                    }
 
                     string singBoxRelayDir = IOPath.Combine(
                         IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
                         "bin_files",
                         "relay");
+                    string singBoxPath =
+                        IOPath.Combine(singBoxRelayDir, "sing-box.exe");
+
+                    if (enableLiveRouting)
+                    {
+                        SingBoxCheckResult routingCheck =
+                            await _singBoxValidationService.ValidateAsync(
+                                singBoxPath,
+                                _validatedProviderRuntimeProfile);
+                        if (!routingCheck.Success)
+                        {
+                            throw new InvalidOperationException(
+                                "sing-box отклонил выборочную маршрутизацию: " +
+                                routingCheck.Message);
+                        }
+                    }
 
                     RelayClientSocksStateTextBlock.Text = "TUN: запускается…";
                     RelayClientSocksStateTextBlock.Foreground = WpfBrushes.DeepSkyBlue;
                     await _serpiumSingBoxSessionManager.StartAsync(
-                        IOPath.Combine(singBoxRelayDir, "sing-box.exe"),
+                        singBoxPath,
                         _validatedProviderRuntimeProfile);
+
+                    if (enableLiveRouting)
+                    {
+                        _activeSavedProfileUsesRoutingTun = true;
+                        _activeRoutingHotReloadEnabled = true;
+                        CaptureActiveRoutingSnapshot(enabledRoutingEntries);
+                    }
+                    else
+                    {
+                        ClearActiveRoutingSnapshot();
+                    }
 
                     _activeSavedProfileId = profileId;
                     ClearSavedProfileFailure();
@@ -2108,20 +2353,27 @@ namespace SerpiumVPN
                     string activeInterface =
                         _serpiumSingBoxSessionManager.InterfaceName ?? "Serpium TUN";
                     SetRelayStatus(
-                        $"Статус: сохранённый профиль подключён — {protocols}; " +
-                        $"TUN {activeInterface}.",
+                        enableLiveRouting
+                            ? $"Статус: сохранённый профиль подключён — {protocols}; " +
+                              $"выборочный TUN {activeInterface}, правил {enabledRoutingRuleCount}; " +
+                              "live reload включён, остальной трафик direct."
+                            : $"Статус: сохранённый профиль подключён — {protocols}; " +
+                              $"полный TUN {activeInterface}.",
                         WpfBrushes.LightGreen);
                 }
             }
             catch (Exception ex)
             {
+                await StopAllRelayTransportsBestEffortAsync();
                 _failedSavedProfileId = profileId;
                 _failedSavedProfileMessage = NormalizeLifecycleError(ex.Message);
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
+                ClearActiveRoutingSnapshot();
                 _currentProviderProfileSaved = false;
                 _validatedRelayProfile = null;
                 DisposeValidatedProviderRuntimeProfile();
+                _routingRuleSetRuntime.DeleteBestEffort();
                 RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 SetRelayStatus(
                     "Статус: сохранённый профиль не подключён — " + ex.Message,
@@ -2131,6 +2383,8 @@ namespace SerpiumVPN
             {
                 _savedProfileOperationInProgress = false;
                 UpdateRelayClientUi();
+                UpdateRoutingSummaryStatus();
+                RenderRoutingRegistryCards();
                 await RefreshSecureProfileVaultStatusAsync();
             }
         }
@@ -2169,6 +2423,8 @@ namespace SerpiumVPN
             {
                 _savedProfileOperationInProgress = false;
                 UpdateRelayClientUi();
+                UpdateRoutingSummaryStatus();
+                RenderRoutingRegistryCards();
                 await RefreshSecureProfileVaultStatusAsync();
             }
         }
@@ -2212,10 +2468,12 @@ namespace SerpiumVPN
             {
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
+                ClearActiveRoutingSnapshot();
                 ClearSavedProfileFailure();
                 _currentProviderProfileSaved = false;
                 _validatedRelayProfile = null;
                 DisposeValidatedProviderRuntimeProfile();
+                _routingRuleSetRuntime.DeleteBestEffort();
                 RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 ButtonSaveRelayProfile.Content = "Сохранить профиль";
                 RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
@@ -2286,12 +2544,7 @@ namespace SerpiumVPN
                 _routingRegistryEntries = await _secureRoutingRegistry.ListAsync();
                 RenderRoutingRegistryCards();
 
-                int enabledCount = _routingRegistryEntries.Count(entry => entry.IsEnabled);
-                SetRoutingStatus(
-                    _routingRegistryEntries.Count == 0
-                        ? "Реестр маршрутизации пуст. Добавьте приложение, игру или сайт."
-                        : $"Правила сохранены защищённо: {_routingRegistryEntries.Count}; включено: {enabledCount}.",
-                    _routingRegistryEntries.Count == 0 ? WpfBrushes.Gray : WpfBrushes.LightGreen);
+                UpdateRoutingSummaryStatus();
             }
             catch (Exception ex)
             {
@@ -2301,6 +2554,292 @@ namespace SerpiumVPN
                     "Реестр маршрутизации недоступен: " + ex.Message,
                     WpfBrushes.OrangeRed);
             }
+        }
+
+        private void CaptureActiveRoutingSnapshot(
+            IEnumerable<RoutingRegistryEntry> entries)
+        {
+            Dictionary<Guid, string> snapshot = entries
+                .Where(entry => entry.IsEnabled)
+                .GroupBy(entry => entry.Id)
+                .ToDictionary(
+                    group => group.Key,
+                    group => BuildRoutingEntryLabel(group.First()));
+
+            _activeSavedProfileRoutingRuleLabels = snapshot;
+            _activeSavedProfileRoutingRuleVersions = entries
+                .Where(entry => entry.IsEnabled)
+                .GroupBy(entry => entry.Id)
+                .ToDictionary(
+                    group => group.Key,
+                    group => group.First().UpdatedUtc.UtcDateTime.Ticks);
+            _activeSavedProfileRoutingRuleCount = snapshot.Count;
+        }
+
+        private void ClearActiveRoutingSnapshot()
+        {
+            _activeSavedProfileRoutingRuleLabels =
+                new Dictionary<Guid, string>();
+            _activeSavedProfileRoutingRuleVersions =
+                new Dictionary<Guid, long>();
+            _activeSavedProfileUsesRoutingTun = false;
+            _activeRoutingHotReloadEnabled = false;
+            _activeSavedProfileRoutingRuleCount = 0;
+        }
+
+        private static string BuildRoutingEntryLabel(
+            RoutingRegistryEntry entry)
+        {
+            string name = string.IsNullOrWhiteSpace(entry.DisplayName)
+                ? entry.Kind == RoutingTargetKind.Application
+                    ? IOPath.GetFileNameWithoutExtension(entry.PrimaryValue)
+                    : entry.PrimaryValue
+                : entry.DisplayName.Trim();
+
+            return entry.Kind == RoutingTargetKind.Application
+                ? $"приложение «{name}»"
+                : $"сайт «{name}»";
+        }
+
+        private static string FormatRoutingRuleCount(int count)
+        {
+            int absolute = Math.Abs(count);
+            int lastTwoDigits = absolute % 100;
+            int lastDigit = absolute % 10;
+
+            string suffix = lastTwoDigits is >= 11 and <= 14
+                ? "правил"
+                : lastDigit == 1
+                    ? "правило"
+                    : lastDigit is >= 2 and <= 4
+                        ? "правила"
+                        : "правил";
+
+            return $"{count} {suffix}";
+        }
+
+        private static string FormatRoutingRuleList(
+            IEnumerable<string> labels,
+            int maximumVisible = 5)
+        {
+            string[] ordered = labels
+                .Where(label => !string.IsNullOrWhiteSpace(label))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(label => label, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+
+            if (ordered.Length == 0)
+                return "нет";
+
+            string visible = string.Join(", ", ordered.Take(maximumVisible));
+            int hiddenCount = ordered.Length - maximumVisible;
+            return hiddenCount > 0
+                ? visible + $" и ещё {hiddenCount}"
+                : visible;
+        }
+
+        private async Task<bool> TryApplyLiveRoutingRulesAsync(
+            string operationDescription)
+        {
+            if (!_activeSavedProfileId.HasValue)
+            {
+                UpdateRoutingSummaryStatus();
+                return false;
+            }
+
+            if (!_activeRoutingHotReloadEnabled ||
+                !_activeSavedProfileUsesRoutingTun ||
+                !_serpiumSingBoxSessionManager.IsRunning)
+            {
+                UpdateRoutingSummaryStatus();
+                return false;
+            }
+
+            try
+            {
+                RoutingRuleSetUpdateResult update =
+                    await _routingRuleSetRuntime.UpdateAsync(
+                        _routingRegistryEntries);
+
+                // Local rule-sets are watched by sing-box. A short debounce keeps
+                // the UI from claiming success before the filesystem event is read.
+                await Task.Delay(350);
+                CaptureActiveRoutingSnapshot(_routingRegistryEntries);
+
+                RelayClientLogTextBox.AppendText(
+                    $"Dynamic rule-set обновлён: правил {update.EnabledRuleCount}." +
+                    Environment.NewLine);
+                RelayClientLogTextBox.ScrollToEnd();
+
+                UpdateRoutingSummaryStatus();
+                RenderRoutingRegistryCards();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                SetRoutingStatus(
+                    $"{operationDescription} сохранено в реестре, но live reload " +
+                    "не подтверждён: " + NormalizeLifecycleError(ex.Message) +
+                    ". Переподключите профиль.",
+                    WpfBrushes.OrangeRed);
+                RenderRoutingRegistryCards();
+                return false;
+            }
+        }
+
+        private void UpdateRoutingSummaryStatus()
+        {
+            if (RoutingStatusTextBlock is null || RoutingStatusIndicator is null)
+                return;
+
+            RoutingRegistryEntry[] enabled = _routingRegistryEntries
+                .Where(entry => entry.IsEnabled)
+                .OrderBy(entry => entry.Kind)
+                .ThenBy(entry => entry.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+                .ToArray();
+
+            Dictionary<Guid, string> selected = enabled.ToDictionary(
+                entry => entry.Id,
+                BuildRoutingEntryLabel);
+
+            string selectedCount = FormatRoutingRuleCount(selected.Count);
+            string selectedList = FormatRoutingRuleList(selected.Values);
+            bool savedProfileActive = _activeSavedProfileId.HasValue;
+
+            if (savedProfileActive && _activeSavedProfileUsesRoutingTun)
+            {
+                bool snapshotMatches =
+                    selected.Count == _activeSavedProfileRoutingRuleLabels.Count &&
+                    enabled.All(entry =>
+                        _activeSavedProfileRoutingRuleLabels.ContainsKey(entry.Id) &&
+                        _activeSavedProfileRoutingRuleVersions.TryGetValue(
+                            entry.Id,
+                            out long appliedTicks) &&
+                        appliedTicks == entry.UpdatedUtc.UtcDateTime.Ticks);
+
+                if (snapshotMatches)
+                {
+                    if (_activeRoutingHotReloadEnabled && selected.Count == 0)
+                    {
+                        SetRoutingStatus(
+                            "Live routing активен, но все правила выключены: " +
+                            "новые соединения идут напрямую. Любую карточку можно " +
+                            "включить без переподключения профиля.",
+                            WpfBrushes.Gray);
+                        return;
+                    }
+
+                    SetRoutingStatus(
+                        _activeRoutingHotReloadEnabled
+                            ? $"Динамически активно {selectedCount}: {selectedList}. " +
+                              "Новые соединения применяют изменения без переподключения; " +
+                              "остальной трафик направляется напрямую."
+                            : $"Активно {selectedCount}: {selectedList}. " +
+                              "Остальной трафик направляется напрямую.",
+                        WpfBrushes.LightGreen);
+                    return;
+                }
+
+                string appliedCount = FormatRoutingRuleCount(
+                    _activeSavedProfileRoutingRuleLabels.Count);
+                string appliedList = FormatRoutingRuleList(
+                    _activeSavedProfileRoutingRuleLabels.Values);
+
+                SetRoutingStatus(
+                    $"Настройки изменены: сейчас выбрано {selectedCount}: " +
+                    $"{selectedList}. В текущем TUN пока применено " +
+                    $"{appliedCount}: {appliedList}. " +
+                    (_activeRoutingHotReloadEnabled
+                        ? "Live reload не подтверждён; переподключите профиль."
+                        : "Переподключите профиль."),
+                    WpfBrushes.Goldenrod);
+                return;
+            }
+
+            if (savedProfileActive)
+            {
+                if (selected.Count > 0)
+                {
+                    SetRoutingStatus(
+                        $"Выбрано {selectedCount}: {selectedList}. " +
+                        "Активный профиль запущен без выборочного TUN; " +
+                        "переподключите профиль, чтобы применить правила.",
+                        WpfBrushes.Goldenrod);
+                }
+                else
+                {
+                    SetRoutingStatus(
+                        "Все правила выключены. Активный профиль работает " +
+                        "в исходном режиме без выборочной маршрутизации.",
+                        WpfBrushes.Gray);
+                }
+
+                return;
+            }
+
+            if (_routingRegistryEntries.Count == 0)
+            {
+                SetRoutingStatus(
+                    "Реестр маршрутизации пуст. Добавьте приложение, игру или сайт.",
+                    WpfBrushes.Gray);
+                return;
+            }
+
+            if (selected.Count == 0)
+            {
+                SetRoutingStatus(
+                    $"Все {_routingRegistryEntries.Count} правил выключены. " +
+                    "Выборочная маршрутизация не будет применена.",
+                    WpfBrushes.Gray);
+                return;
+            }
+
+            SetRoutingStatus(
+                $"Включено {selectedCount}: {selectedList}. " +
+                "Правила будут применены при подключении профиля.",
+                WpfBrushes.LightGreen);
+        }
+
+        private (string Text, WpfBrush Foreground) GetRoutingCardRuntimeStatus(
+            RoutingRegistryEntry entry,
+            bool fileMissing)
+        {
+            if (fileMissing)
+                return ("Файл не найден", WpfBrushes.OrangeRed);
+
+            bool isApplied =
+                _activeSavedProfileUsesRoutingTun &&
+                _activeSavedProfileRoutingRuleLabels.ContainsKey(entry.Id);
+
+            if (_activeSavedProfileId.HasValue)
+            {
+                if (isApplied && entry.IsEnabled)
+                    return (
+                        _activeRoutingHotReloadEnabled
+                            ? "Активно; live reload включён"
+                            : "Активно в текущем VPN-туннеле",
+                        WpfBrushes.LightGreen);
+
+                if (isApplied)
+                {
+                    return (
+                        "Выключено, но ещё действует до переподключения",
+                        WpfBrushes.Goldenrod);
+                }
+
+                if (entry.IsEnabled)
+                {
+                    return (
+                        "Включено; ожидает переподключения профиля",
+                        WpfBrushes.Goldenrod);
+                }
+
+                return ("Исключено из VPN-маршрутизации", WpfBrushes.Gray);
+            }
+
+            return entry.IsEnabled
+                ? ("Будет направлено через VPN при подключении", WpfBrushes.LightGreen)
+                : ("Исключено из VPN-маршрутизации", WpfBrushes.Gray);
         }
 
         private void RenderRoutingRegistryCards()
@@ -2431,18 +2970,12 @@ namespace SerpiumVPN
                     : entry.PrimaryValue
             });
 
+            (string runtimeStatusText, WpfBrush runtimeStatusForeground) =
+                GetRoutingCardRuntimeStatus(entry, fileMissing);
             description.Children.Add(new System.Windows.Controls.TextBlock
             {
-                Text = fileMissing
-                    ? "Файл не найден"
-                    : entry.IsEnabled
-                        ? "Подготовлено для VPN-шлюза"
-                        : "Исключено из VPN-маршрутизации",
-                Foreground = fileMissing
-                    ? WpfBrushes.OrangeRed
-                    : entry.IsEnabled
-                        ? WpfBrushes.LightGreen
-                        : WpfBrushes.Gray,
+                Text = runtimeStatusText,
+                Foreground = runtimeStatusForeground,
                 FontSize = 12,
                 FontWeight = FontWeights.SemiBold,
                 Margin = new Thickness(0, 5, 0, 0)
@@ -2649,14 +3182,12 @@ namespace SerpiumVPN
             try
             {
                 SetRoutingStatus("Сохраняем проверенную группу EXE…", WpfBrushes.Goldenrod);
-                RoutingRegistryEntry added = await _secureRoutingRegistry.AddApplicationBundleAsync(
+                await _secureRoutingRegistry.AddApplicationBundleAsync(
                     bundleDialog.DisplayName,
                     fileDialog.FileName,
                     bundleDialog.SelectedExecutables);
                 await RefreshRoutingRegistryAsync();
-                SetRoutingStatus(
-                    $"Добавлено: {added.DisplayName}; EXE в группе: {added.ExecutableCount}.",
-                    WpfBrushes.LightGreen);
+                await TryApplyLiveRoutingRulesAsync("Добавление приложения");
             }
             catch (Exception ex)
             {
@@ -2705,15 +3236,13 @@ namespace SerpiumVPN
             RenderRoutingRegistryCards();
             try
             {
-                RoutingRegistryEntry updated = await _secureRoutingRegistry.UpdateApplicationBundleAsync(
+                await _secureRoutingRegistry.UpdateApplicationBundleAsync(
                     entry.Id,
                     dialog.DisplayName,
                     entry.PrimaryValue,
                     dialog.SelectedExecutables);
                 await RefreshRoutingRegistryAsync();
-                SetRoutingStatus(
-                    $"Группа обновлена: {updated.DisplayName}; EXE: {updated.ExecutableCount}.",
-                    WpfBrushes.LightGreen);
+                await TryApplyLiveRoutingRulesAsync("Изменение состава приложения");
             }
             catch (Exception ex)
             {
@@ -2743,13 +3272,11 @@ namespace SerpiumVPN
             RenderRoutingRegistryCards();
             try
             {
-                RoutingRegistryEntry added = await _secureRoutingRegistry.AddWebsiteAsync(
+                await _secureRoutingRegistry.AddWebsiteAsync(
                     dialog.Domain,
                     dialog.IncludeSubdomains);
                 await RefreshRoutingRegistryAsync();
-                SetRoutingStatus(
-                    $"Сайт добавлен: {added.DisplayName}.",
-                    WpfBrushes.LightGreen);
+                await TryApplyLiveRoutingRulesAsync("Добавление сайта");
             }
             catch (Exception ex)
             {
@@ -2781,11 +3308,7 @@ namespace SerpiumVPN
                     throw new InvalidOperationException("Правило уже отсутствует в реестре.");
 
                 await RefreshRoutingRegistryAsync();
-                SetRoutingStatus(
-                    isEnabled
-                        ? "Правило включено для будущего VPN-шлюза."
-                        : "Правило исключено из VPN-маршрутизации.",
-                    isEnabled ? WpfBrushes.LightGreen : WpfBrushes.Gray);
+                await TryApplyLiveRoutingRulesAsync("Изменение правила");
             }
             catch (Exception ex)
             {
@@ -2835,13 +3358,9 @@ namespace SerpiumVPN
             RenderRoutingRegistryCards();
             try
             {
-                bool deleted = await _secureRoutingRegistry.DeleteAsync(entryId);
+                await _secureRoutingRegistry.DeleteAsync(entryId);
                 await RefreshRoutingRegistryAsync();
-                SetRoutingStatus(
-                    deleted
-                        ? "Правило удалено из реестра маршрутизации."
-                        : "Правило уже отсутствовало в реестре.",
-                    deleted ? WpfBrushes.LightGreen : WpfBrushes.Goldenrod);
+                await TryApplyLiveRoutingRulesAsync("Удаление правила");
             }
             catch (Exception ex)
             {
@@ -2876,11 +3395,9 @@ namespace SerpiumVPN
             RenderRoutingRegistryCards();
             try
             {
-                int removed = await _secureRoutingRegistry.ClearAsync();
+                await _secureRoutingRegistry.ClearAsync();
                 await RefreshRoutingRegistryAsync();
-                SetRoutingStatus(
-                    $"Список маршрутизации очищен. Удалено правил: {removed}.",
-                    WpfBrushes.LightGreen);
+                await TryApplyLiveRoutingRulesAsync("Очистка списка");
             }
             catch (Exception ex)
             {
@@ -2910,6 +3427,7 @@ namespace SerpiumVPN
         {
             _activeSavedProfileId = null;
             _activeSavedProfileSocksPort = null;
+            ClearActiveRoutingSnapshot();
             ClearSavedProfileFailure();
 
             bool managerReportedRuntime =
@@ -2952,6 +3470,7 @@ namespace SerpiumVPN
                 RelayLifecycleCleanupResult cleanup =
                     await RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(
                         AppContext.BaseDirectory);
+                _routingRuleSetRuntime.DeleteBestEffort();
 
                 return managerReportedRuntime ||
                        cleanup.ProcessesStopped > 0 ||
@@ -2998,6 +3517,37 @@ namespace SerpiumVPN
                 bool singBoxLive = _serpiumSingBoxSessionManager.HasLiveProcess;
                 bool expectsXray =
                     string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase);
+
+                bool expectsXrayWithRoutingTun =
+                    expectsXray && _activeSavedProfileUsesRoutingTun;
+
+                if (expectsXrayWithRoutingTun)
+                {
+                    RelayGatewayState xrayState = _serpiumXraySessionManager.State;
+                    RelayGatewayState routingTunState =
+                        _serpiumSingBoxSessionManager.State;
+
+                    if (xrayState == RelayGatewayState.Failed ||
+                        routingTunState == RelayGatewayState.Failed ||
+                        !xrayLive ||
+                        !singBoxLive)
+                    {
+                        string reason = xrayState == RelayGatewayState.Failed
+                            ? _serpiumXraySessionManager.LastError ??
+                              "Xray завершился с ошибкой"
+                            : routingTunState == RelayGatewayState.Failed
+                                ? _serpiumSingBoxSessionManager.LastError ??
+                                  "выборочный TUN завершился с ошибкой"
+                                : !xrayLive
+                                    ? "Xray неожиданно завершился"
+                                    : "выборочный TUN неожиданно завершился";
+
+                        await StopAllRelayTransportsBestEffortAsync();
+                        await MarkSavedProfileRuntimeFailedAsync(profileId, reason);
+                    }
+
+                    return;
+                }
 
                 if (xrayLive && singBoxLive)
                 {
@@ -3096,6 +3646,7 @@ namespace SerpiumVPN
 
             await RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(
                 AppContext.BaseDirectory);
+            _routingRuleSetRuntime.DeleteBestEffort();
         }
 
         private async Task MarkSavedProfileRuntimeFailedAsync(
@@ -3106,9 +3657,11 @@ namespace SerpiumVPN
             _failedSavedProfileMessage = NormalizeLifecycleError(reason);
             _activeSavedProfileId = null;
             _activeSavedProfileSocksPort = null;
+            ClearActiveRoutingSnapshot();
             _currentProviderProfileSaved = false;
             _validatedRelayProfile = null;
             DisposeValidatedProviderRuntimeProfile();
+            _routingRuleSetRuntime.DeleteBestEffort();
             RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
 
             RelayClientSocksStateTextBlock.Text = "Транспорт: остановлен";
@@ -3119,6 +3672,8 @@ namespace SerpiumVPN
                 WpfBrushes.OrangeRed);
 
             UpdateRelayClientUi();
+            UpdateRoutingSummaryStatus();
+            RenderRoutingRegistryCards();
             await RefreshSecureProfileVaultStatusAsync();
         }
 
