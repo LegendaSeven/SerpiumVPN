@@ -75,6 +75,8 @@ namespace SerpiumVPN
         private SerpiumConnectionProfile? _validatedRelayProfile;
         private ProviderRuntimeProfile? _validatedProviderRuntimeProfile;
         private bool _suppressRelayKeyTextChanged;
+        private string? _pendingRelaySourceKey;
+        private bool _pendingRelaySourceWasDecoded;
         private bool _currentProviderProfileSaved;
         private IReadOnlyList<SecureProfileVaultEntry> _savedProfileEntries =
             Array.Empty<SecureProfileVaultEntry>();
@@ -1047,6 +1049,7 @@ namespace SerpiumVPN
             _relayLifecycleTimer.Stop();
             _zapretManager.Stop();
             _telegramProxyManager.Stop();
+            ClearPendingRelaySourceKey();
             DisposeValidatedProviderRuntimeProfile();
             try
             {
@@ -1447,8 +1450,9 @@ namespace SerpiumVPN
                         "Подключение уже запущено. Сначала нажмите «Отключиться».");
                 }
 
+                string sourceKey = RelayClientKeyTextBox.Text.Trim();
                 EncodedKeyEnvelopeDecodeResult encodedInput =
-                    EncodedKeyEnvelopeDecoder.Decode(RelayClientKeyTextBox.Text);
+                    EncodedKeyEnvelopeDecoder.Decode(sourceKey);
                 SerpiumParseResult parseResult =
                     _serpiumParser.Parse(encodedInput.NormalizedKey);
                 if (!parseResult.Success)
@@ -1540,8 +1544,12 @@ namespace SerpiumVPN
                     ClearSavedProfileFailure();
                     _currentProviderProfileSaved = false;
                     ButtonSaveRelayProfile.Content = "Сохранить профиль";
+                    ClearRelayKeyInputAfterSuccessfulConnection(
+                        sourceKey,
+                        encodedInput);
                     SetRelayStatus(
-                        $"Статус: подключено через AVO — {protocols}; TUN {activeInterface}.",
+                        $"Статус: подключено через AVO — {protocols}; TUN {activeInterface}; " +
+                        "ключ очищен из поля ввода.",
                         WpfBrushes.LightGreen);
                     UpdateRelayClientUi();
                     return;
@@ -1586,9 +1594,13 @@ namespace SerpiumVPN
                 string encodedInputStatus = encodedInput.WasDecoded
                     ? "; Base64-контейнер раскрыт локально"
                     : string.Empty;
+                ClearRelayKeyInputAfterSuccessfulConnection(
+                    sourceKey,
+                    encodedInput);
                 SetRelayStatus(
                     $"Статус: подключено через Xray — {profile.Protocol.ToUpperInvariant()}, " +
-                    $"SOCKS5 127.0.0.1:{socksPort}{encodedInputStatus}",
+                    $"SOCKS5 127.0.0.1:{socksPort}{encodedInputStatus}; " +
+                    "ключ очищен из поля ввода.",
                     WpfBrushes.LightGreen);
                 UpdateRelayClientUi();
             }
@@ -1644,6 +1656,7 @@ namespace SerpiumVPN
                 }
 
                 _validatedRelayProfile = null;
+                ClearPendingRelaySourceKey();
                 DisposeValidatedProviderRuntimeProfile();
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
@@ -1683,6 +1696,10 @@ namespace SerpiumVPN
                                   _serpiumSingBoxSessionManager.HasLiveProcess;
             bool isBusy = xrayBusy || singBoxBusy;
             bool isRunning = xrayRunning || singBoxRunning;
+
+            if (!isBusy && !isRunning)
+                ClearPendingRelaySourceKey();
+
             bool xrayRoutingBridgeMode =
                 _activeSavedProfileUsesRoutingTun &&
                 _validatedRelayProfile is not null;
@@ -1841,10 +1858,22 @@ namespace SerpiumVPN
                 }
 
                 string sourceKey = RelayClientKeyTextBox.Text.Trim();
-                EncodedKeyEnvelopeDecodeResult sourceEnvelope =
-                    EncodedKeyEnvelopeDecoder.Decode(sourceKey);
-                string normalizedSourceKey = sourceEnvelope.NormalizedKey;
-                if (string.IsNullOrWhiteSpace(sourceKey))
+                string normalizedSourceKey;
+                bool sourceWasDecoded;
+
+                if (!string.IsNullOrWhiteSpace(sourceKey))
+                {
+                    EncodedKeyEnvelopeDecodeResult sourceEnvelope =
+                        EncodedKeyEnvelopeDecoder.Decode(sourceKey);
+                    normalizedSourceKey = sourceEnvelope.NormalizedKey;
+                    sourceWasDecoded = sourceEnvelope.WasDecoded;
+                }
+                else if (!string.IsNullOrWhiteSpace(_pendingRelaySourceKey))
+                {
+                    normalizedSourceKey = _pendingRelaySourceKey;
+                    sourceWasDecoded = _pendingRelaySourceWasDecoded;
+                }
+                else
                 {
                     throw new InvalidOperationException(
                         "Исходный ключ уже очищен или отсутствует. Повторите подключение.");
@@ -1872,7 +1901,7 @@ namespace SerpiumVPN
                         providerProfile,
                         normalizedSourceKey);
                     profileSummary = BuildProviderRuntimeProfileSummary(providerProfile);
-                    sourceDescription = sourceEnvelope.WasDecoded
+                    sourceDescription = sourceWasDecoded
                         ? "Исходный Base64-контейнер и раскрытый avo:// ключ не сохранены"
                         : "Исходный avo:// ключ не сохранён";
                 }
@@ -1903,37 +1932,15 @@ namespace SerpiumVPN
                         normalizedSourceKey);
                     _activeSavedProfileSocksPort = socksPort;
                     profileSummary = BuildRelayProfileSummary(xrayProfile);
-                    sourceDescription = sourceEnvelope.WasDecoded
+                    sourceDescription = sourceWasDecoded
                         ? $"Исходный Base64-контейнер и раскрытый {xrayProfile.Protocol.ToLowerInvariant()}:// ключ не сохранены"
                         : $"Исходный {xrayProfile.Protocol.ToLowerInvariant()}:// ключ не сохранён";
                 }
 
                 _currentProviderProfileSaved = true;
                 _activeSavedProfileId = result.Entry.Id;
-                _suppressRelayKeyTextChanged = true;
-                try
-                {
-                    RelayClientKeyTextBox.Clear();
-                    try
-                    {
-                        if (Clipboard.ContainsText() &&
-                            string.Equals(
-                                Clipboard.GetText().Trim(),
-                                sourceKey,
-                                StringComparison.Ordinal))
-                        {
-                            Clipboard.Clear();
-                        }
-                    }
-                    catch
-                    {
-                        // Clipboard may be temporarily locked by another process.
-                    }
-                }
-                finally
-                {
-                    _suppressRelayKeyTextChanged = false;
-                }
+                ClearRelayKeyInputAndMatchingClipboard(sourceKey);
+                ClearPendingRelaySourceKey();
 
                 RelayDetectedProfileTextBlock.Text =
                     profileSummary +
@@ -3882,6 +3889,7 @@ namespace SerpiumVPN
             if (_suppressRelayKeyTextChanged)
                 return;
 
+            ClearPendingRelaySourceKey();
             _currentProviderProfileSaved = false;
             _activeSavedProfileSocksPort = null;
             ButtonSaveRelayProfile.Content = "Сохранить профиль";
@@ -3894,6 +3902,54 @@ namespace SerpiumVPN
                 ? "Формат ещё не определён."
                 : "Ключ изменён — требуется повторная проверка.";
             UpdateRelayClientUi();
+        }
+
+        private void ClearRelayKeyInputAfterSuccessfulConnection(
+            string sourceKey,
+            EncodedKeyEnvelopeDecodeResult encodedInput)
+        {
+            _pendingRelaySourceKey = encodedInput.NormalizedKey;
+            _pendingRelaySourceWasDecoded = encodedInput.WasDecoded;
+            ClearRelayKeyInputAndMatchingClipboard(sourceKey);
+        }
+
+        private void ClearRelayKeyInputAndMatchingClipboard(
+            string sourceKey)
+        {
+            _suppressRelayKeyTextChanged = true;
+            try
+            {
+                RelayClientKeyTextBox.Clear();
+
+                if (string.IsNullOrWhiteSpace(sourceKey))
+                    return;
+
+                try
+                {
+                    if (Clipboard.ContainsText() &&
+                        string.Equals(
+                            Clipboard.GetText().Trim(),
+                            sourceKey,
+                            StringComparison.Ordinal))
+                    {
+                        Clipboard.Clear();
+                    }
+                }
+                catch
+                {
+                    // Clipboard may be temporarily locked by another process.
+                }
+            }
+            finally
+            {
+                _suppressRelayKeyTextChanged = false;
+            }
+        }
+
+        private void ClearPendingRelaySourceKey()
+        {
+            _pendingRelaySourceKey = null;
+            _pendingRelaySourceWasDecoded = false;
         }
 
         private void DisposeValidatedProviderRuntimeProfile()
