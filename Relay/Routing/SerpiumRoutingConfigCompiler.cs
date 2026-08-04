@@ -36,6 +36,13 @@ public static class SerpiumRoutingConfigCompiler
         "winws.exe"
     };
 
+    private static readonly string[] XrayBridgeProcessNames =
+    [
+        "xray.exe",
+        "xray-client.exe",
+        "xray-key-client.exe"
+    ];
+
     private static readonly JsonSerializerOptions SerializerOptions = new()
     {
         WriteIndented = true
@@ -56,7 +63,7 @@ public static class SerpiumRoutingConfigCompiler
 
         RoutingPolicy policy = BuildPolicy(registryEntries);
         string? normalizedRuleSetPath = NormalizeRuleSetPath(ruleSetPath);
-        if (!policy.HasRules)
+        if (!policy.HasRules && normalizedRuleSetPath is null)
             throw new InvalidOperationException(
                 "Для выборочной маршрутизации включите хотя бы одно приложение или сайт.");
 
@@ -131,7 +138,7 @@ public static class SerpiumRoutingConfigCompiler
 
         RoutingPolicy policy = BuildPolicy(registryEntries);
         string? normalizedRuleSetPath = NormalizeRuleSetPath(ruleSetPath);
-        if (!policy.HasRules)
+        if (!policy.HasRules && normalizedRuleSetPath is null)
             throw new InvalidOperationException(
                 "Для Xray TUN включите хотя бы одно приложение или сайт.");
 
@@ -230,28 +237,43 @@ public static class SerpiumRoutingConfigCompiler
 
 
     public static byte[] BuildRuleSetSource(
-        IReadOnlyList<RoutingRegistryEntry> registryEntries)
+        IReadOnlyList<RoutingRegistryEntry> registryEntries,
+        bool excludeXrayBridgeProcessesFromFullTunnel)
     {
         ArgumentNullException.ThrowIfNull(registryEntries);
         RoutingPolicy policy = BuildPolicy(registryEntries);
         JsonArray rules = new();
 
-        if (policy.ExecutablePaths.Length > 0)
+        if (!policy.HasRules)
         {
-            rules.Add(new JsonObject
-            {
-                ["process_path"] = ToJsonArray(policy.ExecutablePaths)
-            });
+            rules.Add(
+                BuildFullTunnelRule(
+                    excludeXrayBridgeProcessesFromFullTunnel));
         }
-
-        if (policy.ExactDomains.Length > 0 || policy.SuffixDomains.Length > 0)
+        else
         {
-            JsonObject domainRule = new();
-            if (policy.ExactDomains.Length > 0)
-                domainRule["domain"] = ToJsonArray(policy.ExactDomains);
-            if (policy.SuffixDomains.Length > 0)
-                domainRule["domain_suffix"] = ToJsonArray(policy.SuffixDomains);
-            rules.Add(domainRule);
+            if (policy.ExecutablePaths.Length > 0)
+            {
+                rules.Add(new JsonObject
+                {
+                    ["process_path"] = ToJsonArray(policy.ExecutablePaths)
+                });
+            }
+
+            if (policy.ExactDomains.Length > 0 ||
+                policy.SuffixDomains.Length > 0)
+            {
+                JsonObject domainRule = new();
+                if (policy.ExactDomains.Length > 0)
+                    domainRule["domain"] = ToJsonArray(policy.ExactDomains);
+                if (policy.SuffixDomains.Length > 0)
+                {
+                    domainRule["domain_suffix"] =
+                        ToJsonArray(policy.SuffixDomains);
+                }
+
+                rules.Add(domainRule);
+            }
         }
 
         JsonObject source = new()
@@ -260,7 +282,37 @@ public static class SerpiumRoutingConfigCompiler
             ["rules"] = rules
         };
 
-        return JsonSerializer.SerializeToUtf8Bytes(source, SerializerOptions);
+        return JsonSerializer.SerializeToUtf8Bytes(
+            source,
+            SerializerOptions);
+    }
+
+    private static JsonObject BuildFullTunnelRule(
+        bool excludeXrayBridgeProcesses)
+    {
+        JsonObject networkRule = new()
+        {
+            ["network"] = new JsonArray("tcp", "udp")
+        };
+
+        if (!excludeXrayBridgeProcesses)
+            return networkRule;
+
+        return new JsonObject
+        {
+            ["type"] = "logical",
+            ["mode"] = "and",
+            ["rules"] = new JsonArray
+            {
+                networkRule,
+                new JsonObject
+                {
+                    ["process_name"] =
+                        ToJsonArray(XrayBridgeProcessNames),
+                    ["invert"] = true
+                }
+            }
+        };
     }
 
     private static RoutingPolicy BuildPolicy(
@@ -495,13 +547,6 @@ public static class SerpiumRoutingConfigCompiler
         string proxyTag,
         string? ruleSetPath)
     {
-        if (!policy.HasRules)
-        {
-            throw new InvalidOperationException(
-                "Пустая выборочная политика запрещена: без включённых правил " +
-                "профиль должен запускаться в исходном полном VPN-режиме.");
-        }
-
         JsonArray rules;
         if (route["rules"] is JsonArray existingRules)
         {
@@ -810,6 +855,13 @@ public static class SerpiumRoutingConfigCompiler
         string baseSummary,
         RoutingPolicy policy)
     {
+        if (!policy.HasRules)
+        {
+            return baseSummary.Trim() + Environment.NewLine +
+                "Динамическая маршрутизация: полный TUN для TCP/UDP; " +
+                "изменения карточек применяются без переподключения.";
+        }
+
         return baseSummary.Trim() + Environment.NewLine +
             $"Выборочная маршрутизация: карточек приложений {policy.ApplicationCards}, " +
             $"EXE {policy.ExecutablePaths.Length}, сайтов {policy.WebsiteCards}; " +

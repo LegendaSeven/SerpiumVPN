@@ -2180,18 +2180,18 @@ namespace SerpiumVPN
                     .Where(item => item.IsEnabled)
                     .ToArray();
                 int enabledRoutingRuleCount = enabledRoutingEntries.Length;
-                bool enableLiveRouting = enabledRoutingRuleCount > 0;
-                if (enableLiveRouting)
-                {
-                    await _routingRuleSetRuntime.UpdateAsync(_routingRegistryEntries);
-                }
-                else
-                {
-                    _routingRuleSetRuntime.DeleteBestEffort();
-                }
+                bool isXrayProfile = string.Equals(
+                    entry.Engine,
+                    "xray",
+                    StringComparison.OrdinalIgnoreCase);
+                bool selectiveRouting = enabledRoutingRuleCount > 0;
+
+                await _routingRuleSetRuntime.UpdateAsync(
+                    _routingRegistryEntries,
+                    excludeXrayBridgeProcessesFromFullTunnel: isXrayProfile);
                 RenderRoutingRegistryCards();
 
-                if (string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase))
+                if (isXrayProfile)
                 {
                     DisposeValidatedProviderRuntimeProfile();
                     SecureXrayVaultProfile savedXray =
@@ -2212,43 +2212,36 @@ namespace SerpiumVPN
                         savedXray.Profile,
                         savedXray.SocksPort);
 
-                    ClearActiveRoutingSnapshot();
-                    if (enableLiveRouting)
-                    {
-                        RelayClientSocksStateTextBlock.Text =
-                            "Xray готов; запускаем выборочный TUN…";
+                    RelayClientSocksStateTextBlock.Text = selectiveRouting
+                        ? "Xray готов; запускаем выборочный TUN…"
+                        : "Xray готов; запускаем полный TUN…";
 
-                        _validatedProviderRuntimeProfile =
-                            SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(
-                                profileId,
-                                savedXray.SocksPort,
-                                _routingRegistryEntries,
-                                _routingRuleSetRuntime.RuleSetPath);
+                    _validatedProviderRuntimeProfile =
+                        SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(
+                            profileId,
+                            savedXray.SocksPort,
+                            _routingRegistryEntries,
+                            _routingRuleSetRuntime.RuleSetPath);
 
-                        string singBoxPath = IOPath.Combine(relayDir, "sing-box.exe");
-                        SingBoxCheckResult routingCheck =
-                            await _singBoxValidationService.ValidateAsync(
-                                singBoxPath,
-                                _validatedProviderRuntimeProfile);
-                        if (!routingCheck.Success)
-                        {
-                            throw new InvalidOperationException(
-                                "sing-box отклонил выборочную маршрутизацию: " +
-                                routingCheck.Message);
-                        }
-
-                        await _serpiumSingBoxSessionManager.StartAsync(
+                    string singBoxPath = IOPath.Combine(relayDir, "sing-box.exe");
+                    SingBoxCheckResult routingCheck =
+                        await _singBoxValidationService.ValidateAsync(
                             singBoxPath,
                             _validatedProviderRuntimeProfile);
-
-                        _activeSavedProfileUsesRoutingTun = true;
-                        _activeRoutingHotReloadEnabled = true;
-                        CaptureActiveRoutingSnapshot(enabledRoutingEntries);
-                    }
-                    else
+                    if (!routingCheck.Success)
                     {
-                        ClearActiveRoutingSnapshot();
+                        throw new InvalidOperationException(
+                            "sing-box отклонил TUN-маршрутизацию: " +
+                            routingCheck.Message);
                     }
+
+                    await _serpiumSingBoxSessionManager.StartAsync(
+                        singBoxPath,
+                        _validatedProviderRuntimeProfile);
+
+                    _activeSavedProfileUsesRoutingTun = true;
+                    _activeRoutingHotReloadEnabled = true;
+                    CaptureActiveRoutingSnapshot(enabledRoutingEntries);
 
                     _activeSavedProfileId = profileId;
                     ClearSavedProfileFailure();
@@ -2257,25 +2250,24 @@ namespace SerpiumVPN
                         BuildRelayProfileSummary(savedXray.Profile) +
                         Environment.NewLine + Environment.NewLine +
                         "Профиль загружен из Serpium Secure Profile Vault." +
-                        (enableLiveRouting
+                        (selectiveRouting
                             ? Environment.NewLine +
                               $"Выборочная маршрутизация активна: правил {enabledRoutingRuleCount}; " +
                               "остальной трафик идёт напрямую."
                             : Environment.NewLine +
-                              "SOCKS5 запущен без TUN: включите правила маршрутизации " +
-                              "и переподключите профиль.");
-                    RelayClientSocksStateTextBlock.Text = enableLiveRouting
-                        ? $"TUN → SOCKS5 активны (127.0.0.1:{savedXray.SocksPort})"
-                        : $"SOCKS5: активен (127.0.0.1:{savedXray.SocksPort})";
+                              "Динамический полный TUN активен: весь новый TCP/UDP " +
+                              "трафик проходит через VPN.");
+                    RelayClientSocksStateTextBlock.Text = selectiveRouting
+                        ? $"Выборочный TUN → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})"
+                        : $"Полный TUN → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})";
                     RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
                     SetRelayStatus(
-                        enableLiveRouting
+                        selectiveRouting
                             ? $"Статус: Xray подключён; выборочный TUN применил " +
                               $"{enabledRoutingRuleCount} правил; live reload включён, " +
                               "остальной трафик direct."
-                            : $"Статус: сохранённый профиль подключён через Xray — " +
-                              $"{savedXray.Profile.Protocol.ToUpperInvariant()}, " +
-                              $"SOCKS5 127.0.0.1:{savedXray.SocksPort}.",
+                            : $"Статус: Xray подключён; полный TUN активен, " +
+                              "live reload включён.",
                         WpfBrushes.LightGreen);
                 }
                 else
@@ -2287,19 +2279,13 @@ namespace SerpiumVPN
                         await _secureProfileVault.OpenProviderProfileAsync(profileId);
                     try
                     {
-                        _validatedProviderRuntimeProfile = enableLiveRouting
-                            ? SerpiumRoutingConfigCompiler.CompileProviderProfile(
+                        _validatedProviderRuntimeProfile =
+                            SerpiumRoutingConfigCompiler.CompileProviderProfile(
                                 openedProviderProfile,
                                 _routingRegistryEntries,
-                                _routingRuleSetRuntime.RuleSetPath)
-                            : openedProviderProfile;
+                                _routingRuleSetRuntime.RuleSetPath);
 
-                        if (!ReferenceEquals(
-                                _validatedProviderRuntimeProfile,
-                                openedProviderProfile))
-                        {
-                            openedProviderProfile.Dispose();
-                        }
+                        openedProviderProfile.Dispose();
                     }
                     catch
                     {
@@ -2314,18 +2300,15 @@ namespace SerpiumVPN
                     string singBoxPath =
                         IOPath.Combine(singBoxRelayDir, "sing-box.exe");
 
-                    if (enableLiveRouting)
+                    SingBoxCheckResult routingCheck =
+                        await _singBoxValidationService.ValidateAsync(
+                            singBoxPath,
+                            _validatedProviderRuntimeProfile);
+                    if (!routingCheck.Success)
                     {
-                        SingBoxCheckResult routingCheck =
-                            await _singBoxValidationService.ValidateAsync(
-                                singBoxPath,
-                                _validatedProviderRuntimeProfile);
-                        if (!routingCheck.Success)
-                        {
-                            throw new InvalidOperationException(
-                                "sing-box отклонил выборочную маршрутизацию: " +
-                                routingCheck.Message);
-                        }
+                        throw new InvalidOperationException(
+                            "sing-box отклонил динамическую маршрутизацию: " +
+                            routingCheck.Message);
                     }
 
                     RelayClientSocksStateTextBlock.Text = "TUN: запускается…";
@@ -2334,16 +2317,9 @@ namespace SerpiumVPN
                         singBoxPath,
                         _validatedProviderRuntimeProfile);
 
-                    if (enableLiveRouting)
-                    {
-                        _activeSavedProfileUsesRoutingTun = true;
-                        _activeRoutingHotReloadEnabled = true;
-                        CaptureActiveRoutingSnapshot(enabledRoutingEntries);
-                    }
-                    else
-                    {
-                        ClearActiveRoutingSnapshot();
-                    }
+                    _activeSavedProfileUsesRoutingTun = true;
+                    _activeRoutingHotReloadEnabled = true;
+                    CaptureActiveRoutingSnapshot(enabledRoutingEntries);
 
                     _activeSavedProfileId = profileId;
                     ClearSavedProfileFailure();
@@ -2360,12 +2336,13 @@ namespace SerpiumVPN
                     string activeInterface =
                         _serpiumSingBoxSessionManager.InterfaceName ?? "Serpium TUN";
                     SetRelayStatus(
-                        enableLiveRouting
+                        selectiveRouting
                             ? $"Статус: сохранённый профиль подключён — {protocols}; " +
                               $"выборочный TUN {activeInterface}, правил {enabledRoutingRuleCount}; " +
                               "live reload включён, остальной трафик direct."
                             : $"Статус: сохранённый профиль подключён — {protocols}; " +
-                              $"полный TUN {activeInterface}.",
+                              $"динамический полный TUN {activeInterface}, " +
+                              "live reload включён.",
                         WpfBrushes.LightGreen);
                 }
             }
@@ -2662,43 +2639,43 @@ namespace SerpiumVPN
                 return false;
             }
 
+            SecureProfileVaultEntry? activeEntry =
+                _savedProfileEntries.FirstOrDefault(
+                    item => item.Id == _activeSavedProfileId.Value);
+            if (activeEntry is null)
+            {
+                SetRoutingStatus(
+                    "Активный профиль не найден в Secure Profile Vault. " +
+                    "Маршрутизация не изменена.",
+                    WpfBrushes.OrangeRed);
+                return false;
+            }
+
+            bool excludeXrayBridgeProcesses = string.Equals(
+                activeEntry.Engine,
+                "xray",
+                StringComparison.OrdinalIgnoreCase);
+
             try
             {
-                RoutingRegistryEntry[] enabledEntries =
-                    _routingRegistryEntries
-                        .Where(entry => entry.IsEnabled)
-                        .ToArray();
-
-                if (enabledEntries.Length == 0)
-                {
-                    RelayClientLogTextBox.AppendText(
-                        "Dynamic rule-set не очищен: пустой набор переключил бы " +
-                        "весь новый трафик на direct. Переподключите профиль для " +
-                        "полного VPN-туннеля." +
-                        Environment.NewLine);
-                    RelayClientLogTextBox.ScrollToEnd();
-
-                    SetRoutingStatus(
-                        "Все правила выключены. Последний применённый набор " +
-                        "сохранён до переподключения, чтобы не допустить утечку " +
-                        "трафика через direct. Переподключите профиль — он " +
-                        "запустится в полном VPN-режиме.",
-                        WpfBrushes.Goldenrod);
-                    RenderRoutingRegistryCards();
-                    return false;
-                }
-
                 RoutingRuleSetUpdateResult update =
                     await _routingRuleSetRuntime.UpdateAsync(
-                        enabledEntries);
+                        _routingRegistryEntries,
+                        excludeXrayBridgeProcesses);
 
                 // Local rule-sets are watched by sing-box. A short debounce keeps
                 // the UI from claiming success before the filesystem event is read.
                 await Task.Delay(350);
                 CaptureActiveRoutingSnapshot(_routingRegistryEntries);
 
+                string updateDescription = update.EnabledRuleCount == 0
+                    ? "полный TUN для нового TCP/UDP-трафика"
+                    : $"выборочных правил {update.EnabledRuleCount}";
+
                 RelayClientLogTextBox.AppendText(
-                    $"Dynamic rule-set обновлён: правил {update.EnabledRuleCount}." +
+                    $"Dynamic rule-set обновлён: {updateDescription}. " +
+                    "Уже открытые соединения сохраняют прежний маршрут до " +
+                    "переподключения приложения." +
                     Environment.NewLine);
                 RelayClientLogTextBox.ScrollToEnd();
 
@@ -2709,9 +2686,10 @@ namespace SerpiumVPN
             catch (Exception ex)
             {
                 SetRoutingStatus(
-                    $"{operationDescription} сохранено в реестре, но live reload " +
-                    "не подтверждён: " + NormalizeLifecycleError(ex.Message) +
-                    ". Переподключите профиль.",
+                    $"{operationDescription} сохранено в реестре, но dynamic " +
+                    "rule-set не обновлён: " +
+                    NormalizeLifecycleError(ex.Message) +
+                    ". Профиль оставлен подключённым; повторите изменение.",
                     WpfBrushes.OrangeRed);
                 RenderRoutingRegistryCards();
                 return false;
@@ -2739,22 +2717,6 @@ namespace SerpiumVPN
 
             if (savedProfileActive && _activeSavedProfileUsesRoutingTun)
             {
-                if (_activeRoutingHotReloadEnabled &&
-                    selected.Count == 0 &&
-                    _activeSavedProfileRoutingRuleLabels.Count > 0)
-                {
-                    string safelyAppliedCount = FormatRoutingRuleCount(
-                        _activeSavedProfileRoutingRuleLabels.Count);
-
-                    SetRoutingStatus(
-                        $"Все правила выключены, но в текущем TUN безопасно " +
-                        $"сохранено {safelyAppliedCount}. Пустой live rule-set не " +
-                        "применён, потому что он отправил бы весь трафик direct. " +
-                        "Переподключите профиль для полного VPN-туннеля.",
-                        WpfBrushes.Goldenrod);
-                    return;
-                }
-
                 bool snapshotMatches =
                     selected.Count == _activeSavedProfileRoutingRuleLabels.Count &&
                     enabled.All(entry =>
@@ -2769,10 +2731,10 @@ namespace SerpiumVPN
                     if (_activeRoutingHotReloadEnabled && selected.Count == 0)
                     {
                         SetRoutingStatus(
-                            "Live routing активен, но все правила выключены: " +
-                            "новые соединения идут напрямую. Любую карточку можно " +
-                            "включить без переподключения профиля.",
-                            WpfBrushes.Gray);
+                            "Динамический полный TUN активен: весь новый TCP/UDP-" +
+                            "трафик проходит через VPN. Включите любую карточку — " +
+                            "режим сразу станет выборочным без переподключения.",
+                            WpfBrushes.LightGreen);
                         return;
                     }
 
@@ -2797,7 +2759,7 @@ namespace SerpiumVPN
                     $"{selectedList}. В текущем TUN пока применено " +
                     $"{appliedCount}: {appliedList}. " +
                     (_activeRoutingHotReloadEnabled
-                        ? "Live reload не подтверждён; переподключите профиль."
+                        ? "Dynamic rule-set ещё не подтверждён; повторите изменение."
                         : "Переподключите профиль."),
                     WpfBrushes.Goldenrod);
                 return;
@@ -2857,9 +2819,20 @@ namespace SerpiumVPN
             bool isApplied =
                 _activeSavedProfileUsesRoutingTun &&
                 _activeSavedProfileRoutingRuleLabels.ContainsKey(entry.Id);
+            bool fullTunnelActive =
+                _activeSavedProfileUsesRoutingTun &&
+                _activeRoutingHotReloadEnabled &&
+                _activeSavedProfileRoutingRuleLabels.Count == 0;
 
             if (_activeSavedProfileId.HasValue)
             {
+                if (fullTunnelActive)
+                {
+                    return (
+                        "Полный TUN: новый трафик проходит через VPN",
+                        WpfBrushes.LightGreen);
+                }
+
                 if (isApplied && entry.IsEnabled)
                     return (
                         _activeRoutingHotReloadEnabled
@@ -2870,14 +2843,14 @@ namespace SerpiumVPN
                 if (isApplied)
                 {
                     return (
-                        "Выключено, но ещё действует до переподключения",
+                        "Выключено; dynamic rule-set обновляется",
                         WpfBrushes.Goldenrod);
                 }
 
                 if (entry.IsEnabled)
                 {
                     return (
-                        "Включено; ожидает переподключения профиля",
+                        "Включено; применяется динамически",
                         WpfBrushes.Goldenrod);
                 }
 

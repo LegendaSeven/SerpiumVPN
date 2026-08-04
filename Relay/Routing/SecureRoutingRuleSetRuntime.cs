@@ -13,8 +13,9 @@ namespace SerpiumVPN.Relay.Routing;
 
 /// <summary>
 /// Owns the private local sing-box rule-set used for live route updates.
-/// The file contains only enabled application paths and domain rules; VPN keys
-/// and provider configuration never enter this runtime directory.
+/// The file contains only enabled application paths/domain rules or a
+/// non-sensitive full-tunnel match rule. VPN keys and provider configuration
+/// never enter this runtime directory.
 /// </summary>
 public sealed class SecureRoutingRuleSetRuntime : IDisposable
 {
@@ -38,6 +39,7 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
 
     public async Task<RoutingRuleSetUpdateResult> UpdateAsync(
         IReadOnlyList<RoutingRegistryEntry> entries,
+        bool excludeXrayBridgeProcessesFromFullTunnel,
         CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -49,7 +51,9 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
         try
         {
             EnsurePrivateRuntimeDirectory();
-            ruleSetUtf8 = SerpiumRoutingConfigCompiler.BuildRuleSetSource(entries);
+            ruleSetUtf8 = SerpiumRoutingConfigCompiler.BuildRuleSetSource(
+                entries,
+                excludeXrayBridgeProcessesFromFullTunnel);
             temporaryPath = RuleSetPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
             await using (FileStream stream = new(
@@ -100,7 +104,8 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
                 if (!root.TryGetProperty("version", out JsonElement version) ||
                     version.GetInt32() != 3 ||
                     !root.TryGetProperty("rules", out JsonElement rules) ||
-                    rules.ValueKind != JsonValueKind.Array)
+                    rules.ValueKind != JsonValueKind.Array ||
+                    rules.GetArrayLength() == 0)
                 {
                     throw new FormatException(
                         "Записанный dynamic rule-set имеет неверную структуру.");
