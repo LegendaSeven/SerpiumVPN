@@ -56,7 +56,7 @@ public static class SerpiumRoutingConfigCompiler
 
         RoutingPolicy policy = BuildPolicy(registryEntries);
         string? normalizedRuleSetPath = NormalizeRuleSetPath(ruleSetPath);
-        if (!policy.HasRules && normalizedRuleSetPath is null)
+        if (!policy.HasRules)
             throw new InvalidOperationException(
                 "Для выборочной маршрутизации включите хотя бы одно приложение или сайт.");
 
@@ -131,7 +131,7 @@ public static class SerpiumRoutingConfigCompiler
 
         RoutingPolicy policy = BuildPolicy(registryEntries);
         string? normalizedRuleSetPath = NormalizeRuleSetPath(ruleSetPath);
-        if (!policy.HasRules && normalizedRuleSetPath is null)
+        if (!policy.HasRules)
             throw new InvalidOperationException(
                 "Для Xray TUN включите хотя бы одно приложение или сайт.");
 
@@ -495,6 +495,13 @@ public static class SerpiumRoutingConfigCompiler
         string proxyTag,
         string? ruleSetPath)
     {
+        if (!policy.HasRules)
+        {
+            throw new InvalidOperationException(
+                "Пустая выборочная политика запрещена: без включённых правил " +
+                "профиль должен запускаться в исходном полном VPN-режиме.");
+        }
+
         JsonArray rules;
         if (route["rules"] is JsonArray existingRules)
         {

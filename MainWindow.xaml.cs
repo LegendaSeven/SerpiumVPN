@@ -2180,7 +2180,7 @@ namespace SerpiumVPN
                     .Where(item => item.IsEnabled)
                     .ToArray();
                 int enabledRoutingRuleCount = enabledRoutingEntries.Length;
-                bool enableLiveRouting = _routingRegistryEntries.Count > 0;
+                bool enableLiveRouting = enabledRoutingRuleCount > 0;
                 if (enableLiveRouting)
                 {
                     await _routingRuleSetRuntime.UpdateAsync(_routingRegistryEntries);
@@ -2664,9 +2664,33 @@ namespace SerpiumVPN
 
             try
             {
+                RoutingRegistryEntry[] enabledEntries =
+                    _routingRegistryEntries
+                        .Where(entry => entry.IsEnabled)
+                        .ToArray();
+
+                if (enabledEntries.Length == 0)
+                {
+                    RelayClientLogTextBox.AppendText(
+                        "Dynamic rule-set не очищен: пустой набор переключил бы " +
+                        "весь новый трафик на direct. Переподключите профиль для " +
+                        "полного VPN-туннеля." +
+                        Environment.NewLine);
+                    RelayClientLogTextBox.ScrollToEnd();
+
+                    SetRoutingStatus(
+                        "Все правила выключены. Последний применённый набор " +
+                        "сохранён до переподключения, чтобы не допустить утечку " +
+                        "трафика через direct. Переподключите профиль — он " +
+                        "запустится в полном VPN-режиме.",
+                        WpfBrushes.Goldenrod);
+                    RenderRoutingRegistryCards();
+                    return false;
+                }
+
                 RoutingRuleSetUpdateResult update =
                     await _routingRuleSetRuntime.UpdateAsync(
-                        _routingRegistryEntries);
+                        enabledEntries);
 
                 // Local rule-sets are watched by sing-box. A short debounce keeps
                 // the UI from claiming success before the filesystem event is read.
@@ -2715,6 +2739,22 @@ namespace SerpiumVPN
 
             if (savedProfileActive && _activeSavedProfileUsesRoutingTun)
             {
+                if (_activeRoutingHotReloadEnabled &&
+                    selected.Count == 0 &&
+                    _activeSavedProfileRoutingRuleLabels.Count > 0)
+                {
+                    string safelyAppliedCount = FormatRoutingRuleCount(
+                        _activeSavedProfileRoutingRuleLabels.Count);
+
+                    SetRoutingStatus(
+                        $"Все правила выключены, но в текущем TUN безопасно " +
+                        $"сохранено {safelyAppliedCount}. Пустой live rule-set не " +
+                        "применён, потому что он отправил бы весь трафик direct. " +
+                        "Переподключите профиль для полного VPN-туннеля.",
+                        WpfBrushes.Goldenrod);
+                    return;
+                }
+
                 bool snapshotMatches =
                     selected.Count == _activeSavedProfileRoutingRuleLabels.Count &&
                     enabled.All(entry =>
