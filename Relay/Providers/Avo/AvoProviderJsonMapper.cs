@@ -185,7 +185,8 @@ internal static class AvoProviderJsonMapper
                 },
                 ["auto_detect_interface"] = true,
                 ["final"] = "proxy",
-                ["find_process"] = false
+                // The mapped profile can later receive dynamic process_path rules.
+                ["find_process"] = true
             },
             ["dns"] = new Dictionary<string, object?>(StringComparer.Ordinal)
             {

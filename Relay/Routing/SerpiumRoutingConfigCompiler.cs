@@ -514,7 +514,9 @@ public static class SerpiumRoutingConfigCompiler
             ["auto_detect_interface"] = true,
             ["default_domain_resolver"] = CreateDefaultDomainResolver(),
             ["final"] = DirectOutboundTag,
-            ["find_process"] = false
+            // Dynamic rule-set can gain process_path rules after startup.
+            // Keep process lookup ready even when the profile starts in full-TUN mode.
+            ["find_process"] = true
         };
     }
 
@@ -605,7 +607,9 @@ public static class SerpiumRoutingConfigCompiler
 
         route["auto_detect_interface"] = true;
         route["default_domain_resolver"] = CreateDefaultDomainResolver();
-        route["find_process"] = false;
+        // Local rule-set hot reload may introduce process_path rules later.
+        // Enabling lookup now avoids requiring a TUN/profile restart.
+        route["find_process"] = true;
         route["final"] = DirectOutboundTag;
     }
 
