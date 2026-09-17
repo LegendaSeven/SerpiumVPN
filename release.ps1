@@ -1,6 +1,6 @@
 ﻿param(
     [Parameter(Mandatory = $true)]
-    [ValidatePattern('^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$')]
+    [ValidatePattern('^\d+\.\d+\.\d+(\.\d+)?(-[0-9A-Za-z.-]+)?$')]
     [string]$Version,
 
     [string]$Runtime = "win-x64",
@@ -135,14 +135,20 @@ if (-not (Test-Path $InstallerScript)) {
 }
 
 $isccCandidates = @(
+    "D:\Program\Inno Setup 7\ISCC.exe",
     "D:\Program\Inno Setup 6\ISCC.exe",
+    "C:\Program Files (x86)\Inno Setup 7\ISCC.exe",
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
+    "C:\Program Files\Inno Setup 7\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )
 
 $compil32Candidates = @(
+    "D:\Program\Inno Setup 7\Compil32.exe",
     "D:\Program\Inno Setup 6\Compil32.exe",
+    "C:\Program Files (x86)\Inno Setup 7\Compil32.exe",
     "C:\Program Files (x86)\Inno Setup 6\Compil32.exe",
+    "C:\Program Files\Inno Setup 7\Compil32.exe",
     "C:\Program Files\Inno Setup 6\Compil32.exe"
 )
 
@@ -154,14 +160,16 @@ $compil32Path = $compil32Candidates |
     Where-Object { Test-Path $_ } |
     Select-Object -First 1
 
+$projectRootDefine = "/DProjectRoot=`"$ProjectRoot`""
+
 if ($isccPath) {
     Write-Host "Using ISCC: $isccPath"
-    & $isccPath "/DMyAppVersion=$Version" $InstallerScript
+    & $isccPath "/DMyAppVersion=$Version" $projectRootDefine $InstallerScript
     Assert-NativeSuccess "Inno Setup ISCC"
 }
 elseif ($compil32Path) {
     Write-Host "Using Compil32: $compil32Path"
-    & $compil32Path /cc "/DMyAppVersion=$Version" $InstallerScript
+    & $compil32Path /cc "/DMyAppVersion=$Version" $projectRootDefine $InstallerScript
     Assert-NativeSuccess "Inno Setup Compil32"
 }
 else {

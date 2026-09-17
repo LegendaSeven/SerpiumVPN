@@ -6,7 +6,9 @@
 #define MyAppVersion "1.0.0"
 #endif
 #define MyAppPublisher "Serpium"
+#ifndef ProjectRoot
 #define ProjectRoot "D:\Program\Serpium\SerpiumVPN"
+#endif
 #define SourceDir ProjectRoot + "\publish\app"
 
 [Setup]
