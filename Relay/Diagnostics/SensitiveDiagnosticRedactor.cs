@@ -14,7 +14,7 @@ public static class SensitiveDiagnosticRedactor
     private const int MaximumSafeLabelLength = 96;
 
     private static readonly Regex KeyUriRegex = new(
-        @"(?i)\b(vless|vmess|trojan|avo)://[^\s""'<>]+",
+        @"(?i)\b(vless|vmess|trojan|avo|hysteria2|hy2|https?)://[^\s""'<>]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex LongEncodedTokenRegex = new(
@@ -22,7 +22,11 @@ public static class SensitiveDiagnosticRedactor
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex SensitiveParameterRegex = new(
-        @"(?i)\b(uuid|id|password|passwd|token|secret|private_key|privatekey|pbk|sid|shortid|key)=([^&\s]+)",
+        "(?i)([\"']?\\b(?:uuid|id|password|passwd|token|secret|private[_-]?key|public[_-]?key|pbk|sid|short[_-]?id|key|auth|authorization|obfs[_-]?password)[\"']?\\s*[:=]\\s*)(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|[^&\\s,}\\]]+)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex AuthorizationRegex = new(
+        @"(?i)\b(Bearer|Basic)\s+[^\s,""'<>]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex UuidRegex = new(
@@ -38,8 +42,9 @@ public static class SensitiveDiagnosticRedactor
         if (string.IsNullOrWhiteSpace(value))
             return string.Empty;
 
-        string redacted = KeyUriRegex.Replace(
-            value,
+        string redacted = AuthorizationRegex.Replace(value, "$1 [СКРЫТО]");
+        redacted = KeyUriRegex.Replace(
+            redacted,
             match => match.Groups[1].Value.ToUpperInvariant() + "://[СКРЫТО]");
 
         redacted = LongEncodedTokenRegex.Replace(
@@ -48,7 +53,7 @@ public static class SensitiveDiagnosticRedactor
 
         redacted = SensitiveParameterRegex.Replace(
             redacted,
-            match => match.Groups[1].Value + "=[СКРЫТО]");
+            match => match.Groups[1].Value + "[СКРЫТО]");
 
         redacted = UuidRegex.Replace(redacted, "[UUID СКРЫТ]");
         return redacted;
@@ -146,7 +151,11 @@ public static class SensitiveDiagnosticRedactor
             "vless://",
             "vmess://",
             "trojan://",
-            "avo://"
+            "avo://",
+            "hysteria2://",
+            "hy2://",
+            "https://",
+            "http://"
         })
         {
             int index = value.IndexOf(

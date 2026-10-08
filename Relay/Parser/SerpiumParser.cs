@@ -11,6 +11,7 @@ public sealed class SerpiumParser
             new VlessKeyParser(),
             new VmessKeyParser(),
             new TrojanKeyParser(),
+            new Hysteria2KeyParser(),
             new AvoEnvelopeKeyParser()
         };
     }

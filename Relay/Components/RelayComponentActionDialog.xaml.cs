@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Windows;
 using System.Windows.Input;
 using System.Windows.Media;
@@ -143,7 +143,7 @@ public partial class RelayComponentActionDialog : Window
             BrushFromHex("#71F2AA");
 
         FooterHintText.Text =
-            "Ключи, профили, маршрутизация и компоненты Zapret не изменяются.";
+            "Ключи, профили, маршрутизация не изменяются.";
     }
 
     private void ConfigureRollback(
@@ -181,7 +181,7 @@ public partial class RelayComponentActionDialog : Window
             BrushFromHex("#FFD983");
 
         FooterHintText.Text =
-            "Staging, ключи, профили, маршрутизация и компоненты Zapret не изменяются.";
+            "Staging, ключи, профили, маршрутизация не изменяются.";
     }
 
     private static string NormalizeVersion(

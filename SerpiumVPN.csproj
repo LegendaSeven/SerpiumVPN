@@ -9,17 +9,20 @@
 		<UseWindowsForms>true</UseWindowsForms>
 		<ApplicationManifest>app.manifest</ApplicationManifest>
 		<ApplicationIcon>serpium_vpn.ico</ApplicationIcon>
-		<AssemblyVersion>1.0.56.4</AssemblyVersion>
-		<FileVersion>1.0.56.4</FileVersion>
-		<Version>1.0.56.4</Version>
-		<VersionPrefix>1.0.56.4</VersionPrefix>
+		<AssemblyVersion>1.0.56.6</AssemblyVersion>
+		<FileVersion>1.0.56.6</FileVersion>
+		<Version>1.0.56.6</Version>
+		<VersionPrefix>1.0.56.6</VersionPrefix>
 		<VersionSuffix></VersionSuffix>
-		<InformationalVersion>1.0.56.4</InformationalVersion>
+		<InformationalVersion>1.0.56.6</InformationalVersion>
 		<BuildSampleEngine Condition="'$(BuildSampleEngine)' == ''">true</BuildSampleEngine>
 	</PropertyGroup>
 
 	<ItemGroup>
 		<None Remove="serpium_vpn.ico" />
+		<None Remove="Assets\Serpium.png" />
+		<!-- Native components and their packaged client sources are built separately. -->
+		<Compile Remove="Native\**\*.cs" />
 		<Compile Remove="SerpiumUpdater\**\*.cs" />
 		<None Remove="SerpiumUpdater\**\*" />
 		<Compile Remove="Engines\SampleEngine\Source\**\*.cs" />
@@ -32,6 +35,7 @@
 
 	<ItemGroup>
 		<Resource Include="serpium_vpn.ico" />
+		<Resource Include="Assets\Serpium.png" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -39,8 +43,9 @@
 	</ItemGroup>
 
 	<ItemGroup>
-		<None Update="bin_files\**\*">
+		<None Update="bin_files\relay\**\*;bin_files\tgws\**\*;bin_files\wfp\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
 		</None>
 		<None Update="Engines\**\*">
 			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -84,4 +89,14 @@
 			  SkipUnchangedFiles="true" />
 	</Target>
 
+  <Target Name="IncludeSampleEngineInPublish"
+          AfterTargets="ComputeFilesToPublish"
+          Condition="'$(BuildSampleEngine)' == 'true'">
+    <ItemGroup>
+      <ResolvedFileToPublish Include="$(MSBuildProjectDirectory)\Engines\SampleEngine\Build\Serpium.SampleEngine.dll">
+        <RelativePath>Engines\SampleEngine\Serpium.SampleEngine.dll</RelativePath>
+        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>

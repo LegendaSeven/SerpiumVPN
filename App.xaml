@@ -3,67 +3,73 @@
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:local="clr-namespace:SerpiumVPN">
     <Application.Resources>
+        <ResourceDictionary>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="/SerpiumVPN;component/UI/Themes/Midnight.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
 
-        <Style TargetType="Button">
-            <Setter Property="Foreground" Value="#E8E8EE"/>
-            <Setter Property="Background" Value="#252530"/>
-            <Setter Property="BorderBrush" Value="#343447"/>
-            <Setter Property="BorderThickness" Value="1"/>
-            <Setter Property="Padding" Value="12,6"/>
-            <Setter Property="Cursor" Value="Hand"/>
-            <Setter Property="HorizontalContentAlignment" Value="Center"/>
-            <Setter Property="VerticalContentAlignment" Value="Center"/>
-            <Setter Property="Template">
-                <Setter.Value>
-                    <ControlTemplate TargetType="Button">
-                        <Grid>
-                            <Border x:Name="BaseBorder"
-                                    Background="{TemplateBinding Background}"
-                                    BorderBrush="{TemplateBinding BorderBrush}"
-                                    BorderThickness="{TemplateBinding BorderThickness}"
-                                    CornerRadius="8"/>
-
-                            <Border x:Name="InteractionOverlay"
-                                    Background="Transparent"
-                                    CornerRadius="8"
-                                    IsHitTestVisible="False"/>
-
-                            <ContentPresenter Margin="{TemplateBinding Padding}"
-                                              HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                              VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                              RecognizesAccessKey="True"/>
-                        </Grid>
-
-                        <ControlTemplate.Triggers>
-                            <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="InteractionOverlay"
-                                        Property="Background"
-                                        Value="#18FFFFFF"/>
-                            </Trigger>
-
-                            <Trigger Property="IsPressed" Value="True">
-                                <Setter TargetName="InteractionOverlay"
-                                        Property="Background"
-                                        Value="#26000000"/>
-                            </Trigger>
-
-                            <Trigger Property="IsKeyboardFocused" Value="True">
-                                <Setter TargetName="BaseBorder"
-                                        Property="BorderBrush"
-                                        Value="#00B35A"/>
-                            </Trigger>
-
-                            <Trigger Property="IsEnabled" Value="False">
-                                <Setter Property="Opacity" Value="0.48"/>
-                                <Setter Property="Cursor" Value="Arrow"/>
-                            </Trigger>
-                        </ControlTemplate.Triggers>
-                    </ControlTemplate>
-                </Setter.Value>
-            </Setter>
-        </Style>
+            <Style TargetType="Button">
+                <Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/>
+                <Setter Property="Background" Value="{DynamicResource Theme.Secondary}"/>
+                <Setter Property="BorderBrush" Value="{DynamicResource Theme.Border}"/>
+                <Setter Property="BorderThickness" Value="1"/>
+                <Setter Property="Padding" Value="12,6"/>
+                <Setter Property="Cursor" Value="Hand"/>
+                <Setter Property="HorizontalContentAlignment" Value="Center"/>
+                <Setter Property="VerticalContentAlignment" Value="Center"/>
+                <Setter Property="Template">
+                    <Setter.Value>
+                        <ControlTemplate TargetType="Button">
+                            <Grid>
+                                <Border x:Name="BaseBorder"
+                                        Background="{TemplateBinding Background}"
+                                        BorderBrush="{TemplateBinding BorderBrush}"
+                                        BorderThickness="{TemplateBinding BorderThickness}"
+                                        CornerRadius="16"/>
+    
+                                <Border x:Name="InteractionOverlay"
+                                        Background="Transparent"
+                                        CornerRadius="16"
+                                        IsHitTestVisible="False"/>
+    
+                                <ContentPresenter Margin="{TemplateBinding Padding}"
+                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                  RecognizesAccessKey="True"/>
+                            </Grid>
+    
+                            <ControlTemplate.Triggers>
+                                <Trigger Property="IsMouseOver" Value="True">
+                                    <Setter TargetName="InteractionOverlay"
+                                            Property="Background"
+                                            Value="{DynamicResource Theme.HoverOverlay}"/>
+                                </Trigger>
+    
+                                <Trigger Property="IsPressed" Value="True">
+                                    <Setter TargetName="InteractionOverlay"
+                                            Property="Background"
+                                            Value="{DynamicResource Theme.PressedOverlay}"/>
+                                </Trigger>
+    
+                                <Trigger Property="IsKeyboardFocused" Value="True">
+                                    <Setter TargetName="BaseBorder" Property="BorderThickness" Value="2"/>
+                                    <Setter TargetName="BaseBorder"
+                                            Property="BorderBrush"
+                                            Value="{DynamicResource Theme.Focus}"/>
+                                </Trigger>
+    
+                                <Trigger Property="IsEnabled" Value="False">
+                                    <Setter Property="Opacity" Value="0.48"/>
+                                    <Setter Property="Cursor" Value="Arrow"/>
+                                </Trigger>
+                            </ControlTemplate.Triggers>
+                        </ControlTemplate>
+                    </Setter.Value>
+                </Setter>
+            </Style>
 
          
+        </ResourceDictionary>
     </Application.Resources>
 </Application>
 

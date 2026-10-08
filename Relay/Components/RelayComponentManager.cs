@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -114,8 +115,8 @@ public sealed record RelayComponentInstallResult(
 /// <summary>
 /// Inspects Relay runtime binaries, verifies official stable GitHub releases,
 /// stages update assets and installs them with a persistent rollback point.
-/// It never reads VPN profiles, keys or generated runtime configurations.
-/// MVP7.3A.3 stops only Serpium-owned component processes and fails closed.
+/// Compatibility checks read saved profiles in memory and never contact their servers.
+/// Installation requires idle components and keeps a verified rollback point.
 /// </summary>
 public sealed class RelayComponentManager : IDisposable
 {
@@ -156,12 +157,20 @@ public sealed class RelayComponentManager : IDisposable
     private readonly string _stagingRoot;
     private readonly string _backupRoot;
     private readonly HttpClient _httpClient;
+    private readonly Func<RelayComponentKind,string,CancellationToken,Task> _compatibilityCheck;
+    // A writable staging manifest is not an independent source of trusted hashes.
+    private readonly ConcurrentDictionary<RelayComponentKind,(string Archive,string Executable)> _verifiedDownloads = new();
     private readonly SemaphoreSlim _stagingGate = new(1, 1);
     private bool _disposed;
 
-    public RelayComponentManager()
+    public RelayComponentManager() : this(AppContext.BaseDirectory,
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),null,null) { }
+
+    internal RelayComponentManager(string baseDirectory,string localAppDataDirectory,HttpClient? httpClient,
+        Func<RelayComponentKind,string,CancellationToken,Task>? compatibilityCheck)
     {
-        _baseDirectory = Path.GetFullPath(AppContext.BaseDirectory)
+        _compatibilityCheck = compatibilityCheck ?? new RelayComponentCompatibilityChecker().ValidateAsync;
+        _baseDirectory = Path.GetFullPath(baseDirectory)
             .TrimEnd(
                 Path.DirectorySeparatorChar,
                 Path.AltDirectorySeparatorChar);
@@ -171,8 +180,7 @@ public sealed class RelayComponentManager : IDisposable
             "bin_files",
             "relay");
 
-        _localAppDataDirectory = Environment.GetFolderPath(
-            Environment.SpecialFolder.LocalApplicationData);
+        _localAppDataDirectory = Path.GetFullPath(localAppDataDirectory);
 
         _stagingRoot = Path.Combine(
             _localAppDataDirectory,
@@ -190,17 +198,19 @@ public sealed class RelayComponentManager : IDisposable
 
         HttpClientHandler handler = new()
         {
-            AllowAutoRedirect = true,
-            MaxAutomaticRedirections = 8,
+            AllowAutoRedirect = false,
+            UseProxy = false,
+            UseCookies = false,
             AutomaticDecompression =
                 System.Net.DecompressionMethods.GZip |
                 System.Net.DecompressionMethods.Deflate
         };
 
-        _httpClient = new HttpClient(handler)
+        _httpClient = httpClient ?? new HttpClient(handler)
         {
             Timeout = TimeSpan.FromMinutes(10)
         };
+        if (httpClient is not null) handler.Dispose();
 
         _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
             "SerpiumVPN-Relay-Component-Manager/1.1");
@@ -211,7 +221,7 @@ public sealed class RelayComponentManager : IDisposable
 
         _httpClient.DefaultRequestHeaders.TryAddWithoutValidation(
             "X-GitHub-Api-Version",
-            "2026-03-10");
+            "2022-11-28");
     }
 
     public async Task<
@@ -562,6 +572,8 @@ public sealed class RelayComponentManager : IDisposable
                 executablePath,
                 cancellationToken).ConfigureAwait(false);
 
+            _verifiedDownloads[kind] = (downloadedSha256,executableSha256);
+
             ReportProgress(
                 progress,
                 kind,
@@ -802,15 +814,26 @@ public sealed class RelayComponentManager : IDisposable
                     "Подготовленная версия уже установлена.");
             }
 
+            if (!IsUpdateAvailable(currentProbe.Version,staged.Manifest.NormalizedVersion))
+                throw new InvalidOperationException("Подготовлена более старая версия. Для возврата используйте резервную копию.");
+            EnsureComponentsIdle();
             ReportInstallProgress(
                 progress,
                 kind,
-                "stop",
-                "Останавливаю только процессы компонента, принадлежащие Serpium...");
-
-            await StopManagedComponentProcessesAsync(
-                kind,
-                cancellationToken).ConfigureAwait(false);
+                "compatibility",
+                "Проверяю совместимость с профилями и маршрутизацией Serpium...");
+            try
+            {
+                await _compatibilityCheck(kind,staged.ExecutablePath,cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception)
+            {
+                return new RelayComponentInstallResult(kind,false,false,currentProbe.Version,currentProbe.Version,
+                    Directory.Exists(GetComponentBackupDirectory(kind)),
+                    "Обновление не прошло проверку совместимости. Сохранена рабочая версия " + currentProbe.Version + ".");
+            }
+            EnsureComponentsIdle();
 
             ReportInstallProgress(
                 progress,
@@ -830,6 +853,7 @@ public sealed class RelayComponentManager : IDisposable
                     backup.Message);
             }
 
+            EnsureComponentsIdle();
             try
             {
                 ReportInstallProgress(
@@ -861,6 +885,8 @@ public sealed class RelayComponentManager : IDisposable
                     staged.Manifest.NormalizedVersion,
                     staged.Manifest.ExecutableSha256,
                     cancellationToken).ConfigureAwait(false);
+
+                await _compatibilityCheck(kind,targetPath,cancellationToken).ConfigureAwait(false);
 
                 TryDeleteDirectory(GetComponentStagingRoot(kind));
 
@@ -903,6 +929,7 @@ public sealed class RelayComponentManager : IDisposable
 
                 if (rollbackError is null)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     throw new InvalidOperationException(
                         "Установка не завершена; автоматический rollback успешно вернул предыдущую версию. " +
                         "Причина: " + installError.Message,
@@ -1311,15 +1338,8 @@ public sealed class RelayComponentManager : IDisposable
 
         timeout.CancelAfter(TimeSpan.FromSeconds(25));
 
-        using HttpRequestMessage request = new(
-            HttpMethod.Get,
-            apiUrl);
-
         using HttpResponseMessage response =
-            await _httpClient.SendAsync(
-                request,
-                HttpCompletionOption.ResponseHeadersRead,
-                timeout.Token).ConfigureAwait(false);
+            await SendOfficialGetAsync(apiUrl,timeout.Token).ConfigureAwait(false);
 
         response.EnsureSuccessStatusCode();
 
@@ -1327,10 +1347,16 @@ public sealed class RelayComponentManager : IDisposable
             await response.Content.ReadAsStreamAsync(
                 timeout.Token).ConfigureAwait(false);
 
-        using JsonDocument document =
-            await JsonDocument.ParseAsync(
-                stream,
-                cancellationToken: timeout.Token).ConfigureAwait(false);
+        using var metadata = new MemoryStream();
+        byte[] metadataBuffer = new byte[16384];
+        int metadataRead;
+        while ((metadataRead = await stream.ReadAsync(metadataBuffer,timeout.Token)) > 0)
+        {
+            if (metadata.Length + metadataRead > 4 * 1024 * 1024)
+                throw new InvalidDataException("Метаданные обновления слишком велики.");
+            metadata.Write(metadataBuffer,0,metadataRead);
+        }
+        using JsonDocument document = JsonDocument.Parse(metadata.ToArray());
 
         JsonElement root = document.RootElement;
 
@@ -1488,6 +1514,10 @@ public sealed class RelayComponentManager : IDisposable
         RelayComponentReleaseInfo release,
         RelayComponentReleaseAsset asset)
     {
+        string expectedRepository = kind == RelayComponentKind.SingBox ? "SagerNet/sing-box" : "XTLS/Xray-core";
+        if (!string.Equals(release.Repository,expectedRepository,StringComparison.Ordinal) ||
+            release.TagName.Contains('-') || release.NormalizedVersion.Contains('-'))
+            throw new InvalidDataException("Разрешены только стабильные релизы официального репозитория.");
         if (asset.SizeBytes <= 0 ||
             asset.SizeBytes > MaximumArchiveBytes)
         {
@@ -1535,6 +1565,7 @@ public sealed class RelayComponentManager : IDisposable
                 uri.Scheme,
                 Uri.UriSchemeHttps,
                 StringComparison.OrdinalIgnoreCase) ||
+            !string.IsNullOrEmpty(uri.UserInfo) || !uri.IsDefaultPort ||
             !string.Equals(
                 uri.Host,
                 "github.com",
@@ -1569,14 +1600,8 @@ public sealed class RelayComponentManager : IDisposable
 
         try
         {
-            using HttpRequestMessage request =
-                new(HttpMethod.Get, asset.DownloadUrl);
-
             using HttpResponseMessage response =
-                await _httpClient.SendAsync(
-                    request,
-                    HttpCompletionOption.ResponseHeadersRead,
-                    cancellationToken).ConfigureAwait(false);
+                await SendOfficialGetAsync(asset.DownloadUrl,cancellationToken).ConfigureAwait(false);
 
             response.EnsureSuccessStatusCode();
 
@@ -2421,6 +2446,49 @@ public sealed class RelayComponentManager : IDisposable
         await output.FlushAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    private void EnsureComponentsIdle()
+    {
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var kind in new[] { RelayComponentKind.SingBox,RelayComponentKind.XrayCore })
+        {
+            paths.Add(Path.GetFullPath(GetPackagedExecutablePath(kind)));
+            string? runtime = GetManagedRuntimeExecutablePath(kind);
+            if (runtime is not null) paths.Add(Path.GetFullPath(runtime));
+        }
+        foreach (string name in paths.Select(Path.GetFileNameWithoutExtension).OfType<string>().Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (Process process in Process.GetProcessesByName(name))
+        {
+            bool owned = false;
+            using (process)
+            {
+                try { owned = !process.HasExited && process.MainModule?.FileName is string path && paths.Contains(Path.GetFullPath(path)); }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception)
+                { throw new InvalidOperationException("Не удалось подтвердить, что компонент остановлен. Обновление отложено."); }
+            }
+            if (owned) throw new InvalidOperationException("Сначала отключите VPN. Рабочие компоненты сейчас используются.");
+        }
+    }
+
+    private async Task<HttpResponseMessage> SendOfficialGetAsync(string url,CancellationToken token)
+    {
+        var uri = new Uri(url);
+        for (int redirect=0;redirect<=5;redirect++)
+        {
+            if (uri.Scheme != Uri.UriSchemeHttps || !uri.IsDefaultPort || !string.IsNullOrEmpty(uri.UserInfo) ||
+                !(uri.Host is "api.github.com" or "github.com" or "release-assets.githubusercontent.com" or "objects.githubusercontent.com"))
+                throw new InvalidDataException("Обновление перенаправлено на недоверенный адрес.");
+            using var request = new HttpRequestMessage(HttpMethod.Get,uri);
+            var response = await _httpClient.SendAsync(request,HttpCompletionOption.ResponseHeadersRead,token).ConfigureAwait(false);
+            if ((int)response.StatusCode is not (301 or 302 or 303 or 307 or 308)) return response;
+            var location = response.Headers.Location;
+            response.Dispose();
+            if (redirect==5 || location is null) throw new InvalidDataException("Слишком много перенаправлений при загрузке обновления.");
+            uri = location.IsAbsoluteUri ? location : new Uri(uri,location);
+        }
+        throw new InvalidDataException("Не удалось получить обновление.");
+    }
+
     private async Task StopManagedComponentProcessesAsync(
         RelayComponentKind kind,
         CancellationToken cancellationToken)
@@ -2663,6 +2731,10 @@ public sealed class RelayComponentManager : IDisposable
                 versionDirectory,
                 "SHA-256 подготовленного исполняемого файла не прошёл проверку.");
         }
+
+        if (!_verifiedDownloads.TryGetValue(kind,out var verified) ||
+            !FixedHexEquals(archiveSha,verified.Archive) || !FixedHexEquals(executableSha,verified.Executable))
+            return InvalidStaging(kind,versionDirectory,"Файлы не подтверждены текущей проверкой официальной загрузки. Повторите подготовку обновления.");
 
         VersionProbeResult probe = await ProbeVersionAsync(
             executablePath,

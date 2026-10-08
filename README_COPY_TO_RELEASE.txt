@@ -11,16 +11,9 @@ publish\app\
   THIRD_PARTY_NOTICES.txt
   licenses\
     LICENSE_tg-ws-proxy.txt
-    LICENSE_zapret-discord-youtube.txt
-    LICENSE_zapret_bol-van.txt
-    LICENSE_WinDivert.txt
     LICENSE_sing-box_GPL-3.0-or-later.txt
     LICENSE_Xray-core_MPL-2.0.txt
   bin_files\
-    bin\
-      winws.exe
-      WinDivert.dll
-      WinDivert64.sys
     relay\
       sing-box.exe
       xray.exe

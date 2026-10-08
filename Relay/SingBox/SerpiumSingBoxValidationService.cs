@@ -1,4 +1,4 @@
-﻿using System.Diagnostics;
+using System.Diagnostics;
 using System.Security.Cryptography;
 using IOPath = System.IO.Path;
 using System.Text;
@@ -25,6 +25,7 @@ internal sealed partial class SerpiumSingBoxValidationService
         if (string.IsNullOrWhiteSpace(singBoxExecutablePath))
             throw new ArgumentException("Путь к sing-box не указан.", nameof(singBoxExecutablePath));
         ArgumentNullException.ThrowIfNull(runtimeProfile);
+        cancellationToken.ThrowIfCancellationRequested();
 
         string executablePath = IOPath.GetFullPath(singBoxExecutablePath);
         if (!System.IO.File.Exists(executablePath))
@@ -58,6 +59,7 @@ internal sealed partial class SerpiumSingBoxValidationService
         string executablePath,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ProcessStartInfo startInfo = CreateBaseStartInfo(executablePath);
         startInfo.ArgumentList.Add("version");
         startInfo.ArgumentList.Add("--disable-color");
@@ -66,28 +68,37 @@ internal sealed partial class SerpiumSingBoxValidationService
         if (!process.Start())
             return "sing-box (версия не определена)";
 
-        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
-        Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+        using var cancellationRegistration = cancellationToken.Register(() => TryKill(process));
+        try
+        {
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
 
-        bool exited = await WaitForExitWithTimeoutAsync(
-            process,
-            VersionTimeout,
-            cancellationToken);
-        if (!exited)
-            return "sing-box (таймаут определения версии)";
+            bool exited = await WaitForExitWithTimeoutAsync(
+                process,
+                VersionTimeout,
+                cancellationToken);
+            if (!exited)
+                return "sing-box (таймаут определения версии)";
 
-        string output = (await stdoutTask) + Environment.NewLine + (await stderrTask);
-        string? versionLine = output
-            .Replace("\r", string.Empty, StringComparison.Ordinal)
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault(line => line.StartsWith("sing-box version ", StringComparison.OrdinalIgnoreCase));
+            string output = (await stdoutTask) + Environment.NewLine + (await stderrTask);
+            string? versionLine = output
+                .Replace("\r", string.Empty, StringComparison.Ordinal)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault(line => line.StartsWith("sing-box version ", StringComparison.OrdinalIgnoreCase));
 
-        if (string.IsNullOrWhiteSpace(versionLine))
-            return "sing-box";
+            if (string.IsNullOrWhiteSpace(versionLine))
+                return "sing-box";
 
-        return versionLine.Length <= 96
-            ? versionLine
-            : versionLine[..96];
+            return versionLine.Length <= 96
+                ? versionLine
+                : versionLine[..96];
+        }
+        finally
+        {
+            // Cancellation must not leave a version/check child behind.
+            await StopCheckProcessAsync(process);
+        }
     }
 
     private static async Task<SingBoxCheckResult> RunCheckAsync(
@@ -96,6 +107,7 @@ internal sealed partial class SerpiumSingBoxValidationService
         byte[] configurationUtf8,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         ProcessStartInfo startInfo = CreateBaseStartInfo(executablePath);
         startInfo.RedirectStandardInput = true;
         startInfo.ArgumentList.Add("check");
@@ -112,47 +124,56 @@ internal sealed partial class SerpiumSingBoxValidationService
                 "Не удалось запустить sing-box check.");
         }
 
-        Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
-        Task<string> stderrTask = process.StandardError.ReadToEndAsync();
-
+        using var cancellationRegistration = cancellationToken.Register(() => TryKill(process));
         try
         {
-            await process.StandardInput.BaseStream.WriteAsync(
-                configurationUtf8.AsMemory(),
+            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderrTask = process.StandardError.ReadToEndAsync();
+
+            try
+            {
+                await process.StandardInput.BaseStream.WriteAsync(
+                    configurationUtf8.AsMemory(),
+                    cancellationToken);
+                await process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+            }
+            finally
+            {
+                process.StandardInput.Close();
+            }
+
+            bool exited = await WaitForExitWithTimeoutAsync(
+                process,
+                CheckTimeout,
                 cancellationToken);
-            await process.StandardInput.BaseStream.FlushAsync(cancellationToken);
+            if (!exited)
+            {
+                return SingBoxCheckResult.Rejected(
+                    engineVersion,
+                    -2,
+                    "Проверка sing-box превысила безопасный таймаут 20 секунд.");
+            }
+
+            string stdout = await stdoutTask;
+            string stderr = await stderrTask;
+            if (process.ExitCode == 0)
+            {
+                return SingBoxCheckResult.Accepted(
+                    engineVersion,
+                    "Конфигурация принята sing-box; открытый JSON на диск не записывался.");
+            }
+
+            string safeEngineError = SanitizeEngineOutput(stderr + Environment.NewLine + stdout);
+            return SingBoxCheckResult.Rejected(
+                engineVersion,
+                process.ExitCode,
+                "sing-box отклонил конфигурацию: " + safeEngineError);
         }
         finally
         {
-            process.StandardInput.Close();
+            // Cancellation must not leave a version/check child behind.
+            await StopCheckProcessAsync(process);
         }
-
-        bool exited = await WaitForExitWithTimeoutAsync(
-            process,
-            CheckTimeout,
-            cancellationToken);
-        if (!exited)
-        {
-            return SingBoxCheckResult.Rejected(
-                engineVersion,
-                -2,
-                "Проверка sing-box превысила безопасный таймаут 20 секунд.");
-        }
-
-        string stdout = await stdoutTask;
-        string stderr = await stderrTask;
-        if (process.ExitCode == 0)
-        {
-            return SingBoxCheckResult.Accepted(
-                engineVersion,
-                "Конфигурация принята sing-box; открытый JSON на диск не записывался.");
-        }
-
-        string safeEngineError = SanitizeEngineOutput(stderr + Environment.NewLine + stdout);
-        return SingBoxCheckResult.Rejected(
-            engineVersion,
-            process.ExitCode,
-            "sing-box отклонил конфигурацию: " + safeEngineError);
     }
 
     private static ProcessStartInfo CreateBaseStartInfo(string executablePath) =>
@@ -180,6 +201,7 @@ internal sealed partial class SerpiumSingBoxValidationService
         try
         {
             await process.WaitForExitAsync(timeoutSource.Token);
+            cancellationToken.ThrowIfCancellationRequested();
             return true;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
@@ -196,6 +218,15 @@ internal sealed partial class SerpiumSingBoxValidationService
 
             return false;
         }
+    }
+
+    private static async Task StopCheckProcessAsync(Process process)
+    {
+        TryKill(process);
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(4));
+        try { await process.WaitForExitAsync(timeout.Token); }
+        catch (OperationCanceledException)
+        { throw new System.IO.IOException("Не удалось остановить процесс проверки конфигурации."); }
     }
 
     private static void TryKill(Process process)

@@ -34,7 +34,7 @@ public sealed class ApplicationBundleDiscoveryService
 
     private static readonly string[] BlockedProcessNames =
     {
-        "serpiumvpn", "serpiumupdater", "xray", "sing-box", "winws",
+        "serpiumvpn", "serpiumupdater", "xray", "sing-box",
         "explorer", "dwm", "csrss", "services", "svchost", "lsass",
         "smss", "wininit", "winlogon", "system", "registry"
     };

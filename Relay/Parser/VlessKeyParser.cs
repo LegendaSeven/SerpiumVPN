@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace SerpiumVPN.Relay.Parser;
 
 public sealed class VlessKeyParser : ISerpiumKeyParser
@@ -34,6 +36,15 @@ public sealed class VlessKeyParser : ISerpiumKeyParser
             if (security == "reality" && string.IsNullOrWhiteSpace(publicKey))
                 return SerpiumParseResult.Fail("В VLESS Reality-ключе отсутствует параметр pbk.");
 
+            JsonElement? extra = null;
+            if (transport == "xhttp" && query.TryGetValue("extra", out string? extraText))
+            {
+                using var document = JsonDocument.Parse(extraText, new JsonDocumentOptions { MaxDepth = 32 });
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                    return SerpiumParseResult.Fail("Параметры XHTTP extra должны быть объектом JSON.");
+                extra = document.RootElement.Clone();
+            }
+
             SerpiumConnectionProfile profile = new()
             {
                 Protocol = "vless",
@@ -55,6 +66,7 @@ public sealed class VlessKeyParser : ISerpiumKeyParser
                 HostHeader = SerpiumParserUtilities.Get(query, "host"),
                 ServiceName = SerpiumParserUtilities.Get(query, "serviceName"),
                 Mode = SerpiumParserUtilities.Get(query, "mode"),
+                XhttpExtra = extra,
                 HeaderType = SerpiumParserUtilities.Get(query, "headerType"),
                 Seed = SerpiumParserUtilities.Get(query, "seed"),
                 PacketEncoding = SerpiumParserUtilities.Get(query, "packetEncoding"),

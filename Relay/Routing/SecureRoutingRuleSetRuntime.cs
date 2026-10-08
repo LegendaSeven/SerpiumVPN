@@ -23,16 +23,17 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private bool _disposed;
 
-    public SecureRoutingRuleSetRuntime()
+    public SecureRoutingRuleSetRuntime(string? runtimeDirectory = null)
     {
-        RuntimeDirectory = Path.Combine(
+        RuntimeDirectory = Path.GetFullPath(runtimeDirectory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "SerpiumVPN",
             "Runtime",
-            "Routing");
+            "Routing"));
         RuleSetPath = Path.Combine(RuntimeDirectory, RuleSetFileName);
     }
 
+    public bool FullTunnelWhenEmpty { get; set; } = true;
     public string RuntimeDirectory { get; }
     public string RuleSetPath { get; }
     public bool IsPrepared => File.Exists(RuleSetPath);
@@ -48,12 +49,14 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         byte[]? ruleSetUtf8 = null;
         string? temporaryPath = null;
+        string activationProbe = SfpPolicyAcknowledgement.CreateProbe();
         try
         {
             EnsurePrivateRuntimeDirectory();
             ruleSetUtf8 = SerpiumRoutingConfigCompiler.BuildRuleSetSource(
                 entries,
-                excludeXrayBridgeProcessesFromFullTunnel);
+                excludeXrayBridgeProcessesFromFullTunnel,
+                FullTunnelWhenEmpty, activationProbe);
             temporaryPath = RuleSetPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
             await using (FileStream stream = new(
@@ -121,7 +124,7 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
             return new RoutingRuleSetUpdateResult(
                 entries.Count(entry => entry.IsEnabled),
                 ruleSetUtf8.Length,
-                DateTimeOffset.UtcNow);
+                DateTimeOffset.UtcNow, activationProbe);
         }
         finally
         {
@@ -271,4 +274,5 @@ public sealed class SecureRoutingRuleSetRuntime : IDisposable
 public sealed record RoutingRuleSetUpdateResult(
     int EnabledRuleCount,
     int ByteCount,
-    DateTimeOffset UpdatedUtc);
+    DateTimeOffset UpdatedUtc,
+    string ActivationProbe);

@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -20,7 +20,7 @@ namespace SerpiumVPN
 
     /// <summary>
     /// Управляет отдельным TG WS Proxy от Flowseal.
-    /// Это не winws-стратегия и не системный VPN: Telegram Desktop подключается
+    /// Telegram Desktop подключается
     /// к локальному MTProto-прокси 127.0.0.1:1443, а прокси уже гонит трафик через WS/TLS.
     /// </summary>
     public sealed class TelegramProxyManager

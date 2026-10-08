@@ -30,6 +30,9 @@ public sealed class SerpiumConnectionProfile
     public string HostHeader { get; init; } = string.Empty;
     public string ServiceName { get; init; } = string.Empty;
     public string Mode { get; init; } = string.Empty;
+    public System.Text.Json.JsonElement? XhttpExtra { get; init; }
+    public string Obfuscation { get; init; } = string.Empty;
+    public string ObfuscationPassword { get; init; } = string.Empty;
     public string HeaderType { get; init; } = string.Empty;
     public string Seed { get; init; } = string.Empty;
     public string PacketEncoding { get; init; } = string.Empty;

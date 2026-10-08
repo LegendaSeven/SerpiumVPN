@@ -1,14 +1,42 @@
 # SerpiumVPN
 
-SerpiumVPN is a Windows desktop application for running local bypass/proxy profiles for selected services. The project is built as a WPF app on .NET and wraps several third-party networking components behind a simple desktop interface.
+SerpiumVPN is a Windows desktop application for VPN connections with per-application routing. The project is built as a WPF app on .NET and wraps several third-party networking components behind a simple desktop interface.
 
 ## Features
 
 - Windows WPF interface for starting and stopping profiles.
-- Built-in profiles and lists for YouTube, Discord, Google, and custom domains.
+- Connection key input and application switches for selective VPN routing.
+- Two switchable themes: «Полуночная Змеюка» (midnight/mint) and «Нежная Булка» (soft pink).
 - Telegram Desktop WS/MTProto local proxy mode.
-- Vendor update flow for bundled third-party components.
+- Updates for Telegram WS Proxy, sing-box and Xray Core.
 - Third-party license and attribution files included in the repository.
+
+## Appearance
+
+The theme button in the header switches the main screen immediately, including
+connection indicators, application switches and the native light/dark title bar.
+It preserves the connection, entered key, application selection and list position.
+The preference is saved per user in `%LocalAppData%\SerpiumVPN\appearance.txt`;
+the default is «Полуночная Змеюка». Missing or unrecognized preferences use the default.
+
+## Application discovery
+
+Application switches apply live through the SFP user-mode routing controller.
+The tunnel stays running: the controller confirms that sing-box loaded the new
+policy, then closes only that application's connections still using the previous
+route. Other applications remain connected. TCP connections must reconnect;
+the application controls how quickly it retries. See `docs/SFP_LIVE_SWITCH.md`.
+
+The application list excludes Windows components, registered service executables,
+updaters and background helpers. Common network clients are available before launch;
+other interactive applications are learned from internet TCP connections owned by
+the current user. While the VPN is running, confirmed TUN destinations also provide
+UDP evidence. A local listener or LAN connection alone does not qualify an app.
+An unknown UDP-only app may therefore first appear after the VPN has been started.
+
+Registrations are cached for five minutes; process/network observations refresh every
+five seconds. Previously observed applications are remembered locally for up to 90
+days without storing destination addresses. Removed executables are discarded.
 
 ## Requirements
 
@@ -54,10 +82,9 @@ The `Release` workflow builds the app and updater on `windows-latest`, creates o
 ## Repository Layout
 
 - `MainWindow.xaml` / `MainWindow.xaml.cs` - main desktop UI.
-- `ZapretManager.cs` - winws/zapret process and profile control.
 - `TelegramProxyManager.cs` - Telegram Desktop proxy mode.
-- `VendorUpdateManager.cs` - update flow for bundled vendor binaries.
-- `bin_files/` - runtime files, profiles, lists, and bundled third-party binaries.
+- `VendorUpdateManager.cs` - Telegram WS Proxy updates.
+- `bin_files/relay`, `bin_files/tgws`, `bin_files/wfp` - bundled networking components.
 - `licenses/` - third-party license texts.
 - `THIRD_PARTY_NOTICES.txt` - attribution and component summary.
 
@@ -66,11 +93,10 @@ The `Release` workflow builds the app and updater on `windows-latest`, creates o
 SerpiumVPN uses and/or may be distributed with third-party components, including:
 
 - Flowseal/tg-ws-proxy
-- Flowseal/zapret-discord-youtube
-- bol-van/zapret
-- basil00/WinDivert
+- SagerNet/sing-box
+- XTLS/Xray-core
 
-These projects belong to their respective authors. SerpiumVPN is not affiliated with Flowseal, bol-van, WinDivert, Telegram, YouTube, Discord, or Google.
+These projects belong to their respective authors. SerpiumVPN is not affiliated with Flowseal, SagerNet, XTLS, Telegram, YouTube, Discord, or Google.
 
 See `THIRD_PARTY_NOTICES.txt` and the `licenses/` directory for license details and attribution.
 

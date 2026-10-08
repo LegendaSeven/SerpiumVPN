@@ -1,9 +1,11 @@
-﻿using System.ComponentModel;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Http;
 using System.Net.NetworkInformation;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Principal;
 using System.Runtime.InteropServices;
@@ -12,6 +14,9 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Win32.SafeHandles;
 using SerpiumVPN.Relay.Providers;
+using SerpiumVPN.Relay.Routing;
+
+using SerpiumVPN.Relay.Diagnostics;
 
 namespace SerpiumVPN.Relay.SingBox;
 
@@ -20,11 +25,34 @@ namespace SerpiumVPN.Relay.SingBox;
 /// The provider configuration is supplied through stdin and is never written to disk.
 /// Only process identity and the non-sensitive interface name are persisted for recovery.
 /// </summary>
+public enum SingBoxObservedRoute
+{
+    Direct = 0,
+    Vpn = 1
+}
+
+public sealed record SingBoxFlowRouteObservation(
+    string ProcessPath,
+    SingBoxObservedRoute Route,
+    DateTimeOffset ObservedAt);
+
+public sealed record SingBoxActiveConnection(
+    string Id,
+    string ProcessPath,
+    SingBoxObservedRoute Route,
+    bool UsesInternet = false);
+
+public sealed record SingBoxActiveConnectionsSnapshot(
+    DateTimeOffset ObservedAt,
+    IReadOnlyList<SingBoxActiveConnection> Connections,
+    bool ApiAvailable);
+
 public sealed class SerpiumSingBoxSessionManager : IDisposable
 {
     private static readonly TimeSpan InterfaceStartTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ConnectivityTimeout = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan InterfaceStopTimeout = TimeSpan.FromSeconds(30);
+    private static readonly TimeSpan ProxyStartTimeout = TimeSpan.FromSeconds(12);
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const int JobObjectExtendedLimitInformationClass = 9;
     private static readonly Uri ConnectivityProbeUri =
@@ -50,11 +78,46 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         @"(?<![A-Za-z0-9+/=_-])[A-Za-z0-9+/=_-]{28,}(?![A-Za-z0-9+/=_-])",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    // sing-box INFO flow prefix is typically "[123456789 4ms]".
+    // Correlate router process discovery with the later outbound decision.
+    private static readonly Regex FlowIdRegex = new(
+        @"\[(?<id>[0-9]{1,20})(?:\s+[^\]]+)?\]",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex ProcessPathLogRegex = new(
+        @"(?i)\brouter:\s+found process path:\s*(?<path>.+?)\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex OutboundRouteLogRegex = new(
+        @"(?i)\boutbound/[^\[]+\[(?<tag>[^\]]+)\]:\s+" +
+        @"outbound(?:\s+packet)?\s+connection\s+to\s+(?<destination>.+?)\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex DestinationPortRegex = new(
+        @":(?<port>[0-9]{1,5})\s*$",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     private readonly string _relayDirectory;
     private readonly string _statePath;
     private Process? _process;
     private SafeFileHandle? _killOnCloseJob;
     private string? _interfaceName;
+    private int? _socksPort;
+    private bool _proxyBackendMode;
+    private readonly object _flowObservationGate = new();
+    private readonly Dictionary<string, string> _flowProcessPaths =
+        new(StringComparer.Ordinal);
+    private readonly HttpClient _clashApiClient = new(
+        new HttpClientHandler { UseProxy = false, AllowAutoRedirect = false })
+    {
+        Timeout = TimeSpan.FromSeconds(2)
+    };
+    private CancellationTokenSource? _connectionMonitorCts;
+    private Task? _connectionMonitorTask;
+    private int _clashApiPort;
+    private string _clashApiSecret = string.Empty;
+    private string? _connectivityProbeOutboundTag;
+    private string _lastActiveConnectionFingerprint = string.Empty;
     private bool _disposed;
 
     public SerpiumSingBoxSessionManager()
@@ -73,6 +136,9 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     public bool IsRunning => _process is { HasExited: false };
     public string? LastError { get; private set; }
     public string? InterfaceName => _interfaceName;
+    public int? SocksPort => _socksPort;
+    public bool IsProxyBackendMode => _proxyBackendMode;
+    public int? ProcessId => _process is { HasExited: false } ? _process.Id : null;
 
     public bool HasLiveProcess
     {
@@ -91,6 +157,14 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
     public event Action<string>? LogReceived;
     public event Action<RelayGatewayState>? StateChanged;
+
+    /// <summary>
+    /// Actual data-plane observation from sing-box TUN routing.
+    /// Destination addresses are intentionally not exposed to the UI.
+    /// </summary>
+    public event Action<SingBoxFlowRouteObservation>? FlowRouteObserved;
+    public event Action<SingBoxActiveConnectionsSnapshot>?
+        ActiveConnectionsChanged;
 
     public async Task StartAsync(
         string singBoxExecutablePath,
@@ -118,13 +192,21 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
         byte[] configurationUtf8 = runtimeProfile.CopyConfiguration();
         string? interfaceName = null;
+        _proxyBackendMode = false;
+        _socksPort = null;
+        _clashApiPort = runtimeProfile.ClashApiPort;
+        _clashApiSecret = runtimeProfile.ClashApiSecret;
+        _connectivityProbeOutboundTag = null;
         SetState(RelayGatewayState.Starting);
         LastError = null;
 
         try
         {
             interfaceName = ReadAndValidateTunInterface(configurationUtf8);
+            if (_clashApiPort > 0)
+                _connectivityProbeOutboundTag = VpnOutboundProbe.ReadOutboundTag(configurationUtf8);
             _interfaceName = interfaceName;
+            ClearFlowObservations();
 
             Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
             await StopStoredOwnedProcessAsync(cancellationToken);
@@ -193,7 +275,8 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
             ThrowIfProcessExited("sing-box завершился во время проверки подключения");
 
             LogReceived?.Invoke($"TUN готов: {interfaceName}");
-            LogReceived?.Invoke("Контрольный HTTPS-запрос через TUN выполнен успешно.");
+            LogReceived?.Invoke("Контрольный HTTPS-запрос через VPN выполнен успешно.");
+            StartActiveConnectionMonitor();
             SetState(RelayGatewayState.Running);
         }
         catch (Exception ex)
@@ -219,6 +302,147 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         }
     }
 
+
+    /// <summary>
+    /// Starts sing-box as a loopback SOCKS5 provider backend for Serpium WFP.
+    /// This mode does not create a TUN adapter and does not modify system routes.
+    /// The caller must pass this process PID to the WFP bridge bypass list.
+    /// </summary>
+    public async Task StartProxyAsync(
+        string singBoxExecutablePath,
+        ProviderRuntimeProfile runtimeProfile,
+        int socksPort,
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(runtimeProfile);
+
+        if (HasLiveProcess)
+            throw new InvalidOperationException("sing-box transport уже запущен.");
+        if (socksPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(socksPort));
+
+        string executablePath = Path.GetFullPath(singBoxExecutablePath);
+        if (!File.Exists(executablePath))
+        {
+            throw new FileNotFoundException(
+                "sing-box.exe не найден в bin_files\\relay.",
+                executablePath);
+        }
+
+        byte[] configurationUtf8 = runtimeProfile.CopyConfiguration();
+        _interfaceName = null;
+        _proxyBackendMode = true;
+        _socksPort = socksPort;
+        _clashApiPort = 0;
+        _clashApiSecret = string.Empty;
+        StopActiveConnectionMonitor();
+        SetState(RelayGatewayState.Starting);
+        LastError = null;
+
+        try
+        {
+            ReadAndValidateLoopbackSocksInbound(
+                configurationUtf8,
+                socksPort);
+            ClearFlowObservations();
+
+            Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
+            await StopStoredOwnedProcessAsync(cancellationToken);
+
+            ProcessStartInfo startInfo = new()
+            {
+                FileName = executablePath,
+                WorkingDirectory =
+                    Path.GetDirectoryName(executablePath) ?? _relayDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+            startInfo.ArgumentList.Add("run");
+            startInfo.ArgumentList.Add("--disable-color");
+            startInfo.ArgumentList.Add("-c");
+            startInfo.ArgumentList.Add("stdin");
+
+            _process = new Process
+            {
+                StartInfo = startInfo,
+                EnableRaisingEvents = true
+            };
+            _process.OutputDataReceived += (_, eventArgs) =>
+                ForwardLog(eventArgs.Data);
+            _process.ErrorDataReceived += (_, eventArgs) =>
+                ForwardLog(eventArgs.Data);
+            _process.Exited += (_, _) => HandleUnexpectedExit();
+
+            if (!_process.Start())
+                throw new InvalidOperationException(
+                    "Не удалось запустить sing-box WFP backend.");
+
+            AttachProcessToKillOnCloseJob(_process);
+            SaveState(_process, executablePath, string.Empty);
+            _process.BeginOutputReadLine();
+            _process.BeginErrorReadLine();
+
+            try
+            {
+                await _process.StandardInput.BaseStream.WriteAsync(
+                    configurationUtf8.AsMemory(),
+                    cancellationToken);
+                await _process.StandardInput.BaseStream.FlushAsync(
+                    cancellationToken);
+            }
+            finally
+            {
+                _process.StandardInput.Close();
+            }
+
+            await WaitForLoopbackSocksAsync(
+                socksPort,
+                ProxyStartTimeout,
+                cancellationToken);
+
+            ThrowIfProcessExited(
+                "sing-box WFP backend завершился до READY");
+
+            LogReceived?.Invoke(
+                $"WFP backend SOCKS5 готов: 127.0.0.1:{socksPort}");
+            SetState(RelayGatewayState.Running);
+        }
+        catch (Exception ex)
+        {
+            LastError = ex.Message;
+            await KillCurrentProcessAsync(CancellationToken.None);
+            DeleteStateFile();
+            _socksPort = null;
+            _proxyBackendMode = false;
+            SetState(RelayGatewayState.Failed);
+            throw;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(configurationUtf8);
+        }
+    }
+
+    public static int FindAvailableLoopbackPort()
+    {
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        try
+        {
+            listener.Start();
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -229,6 +453,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
         SetState(RelayGatewayState.Stopping);
         LastError = null;
+        StopActiveConnectionMonitor();
 
         try
         {
@@ -258,8 +483,124 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
             }
 
             _interfaceName = null;
+            _socksPort = null;
+            _proxyBackendMode = false;
+            _clashApiPort = 0;
+            _clashApiSecret = string.Empty;
+            ClearFlowObservations();
             SetState(RelayGatewayState.Stopped);
         }
+    }
+
+
+    private static void ReadAndValidateLoopbackSocksInbound(
+        byte[] configurationUtf8,
+        int expectedPort)
+    {
+        using JsonDocument document = JsonDocument.Parse(configurationUtf8);
+        JsonElement root = document.RootElement;
+        if (!root.TryGetProperty("inbounds", out JsonElement inbounds) ||
+            inbounds.ValueKind != JsonValueKind.Array)
+        {
+            throw new FormatException(
+                "WFP backend configuration не содержит inbounds.");
+        }
+
+        foreach (JsonElement inbound in inbounds.EnumerateArray())
+        {
+            if (inbound.ValueKind != JsonValueKind.Object ||
+                !inbound.TryGetProperty("type", out JsonElement typeValue) ||
+                typeValue.ValueKind != JsonValueKind.String ||
+                !string.Equals(
+                    typeValue.GetString(),
+                    "socks",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            string listen = inbound.TryGetProperty(
+                    "listen",
+                    out JsonElement listenValue) &&
+                listenValue.ValueKind == JsonValueKind.String
+                    ? listenValue.GetString() ?? string.Empty
+                    : string.Empty;
+
+            int port = inbound.TryGetProperty(
+                    "listen_port",
+                    out JsonElement portValue) &&
+                portValue.TryGetInt32(out int parsedPort)
+                    ? parsedPort
+                    : 0;
+
+            if (!string.Equals(
+                    listen,
+                    "127.0.0.1",
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                throw new FormatException(
+                    "WFP backend SOCKS5 обязан слушать только 127.0.0.1.");
+            }
+
+            if (port != expectedPort)
+            {
+                throw new FormatException(
+                    "WFP backend SOCKS5 использует неожиданный локальный порт.");
+            }
+
+            return;
+        }
+
+        throw new FormatException(
+            "В WFP backend configuration не найден loopback SOCKS5 inbound.");
+    }
+
+    private async Task WaitForLoopbackSocksAsync(
+        int socksPort,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        DateTime deadline = DateTime.UtcNow + timeout;
+        string lastFailure = "порт ещё не отвечает";
+
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ThrowIfProcessExited(
+                "sing-box WFP backend завершился до открытия SOCKS5");
+
+            using TcpClient client = new(AddressFamily.InterNetwork);
+            using CancellationTokenSource attempt =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            attempt.CancelAfter(TimeSpan.FromMilliseconds(650));
+
+            try
+            {
+                await client.ConnectAsync(
+                    IPAddress.Loopback,
+                    socksPort,
+                    attempt.Token);
+                return;
+            }
+            catch (OperationCanceledException)
+                when (!cancellationToken.IsCancellationRequested)
+            {
+                lastFailure = "таймаут подключения к loopback SOCKS5";
+            }
+            catch (SocketException ex)
+            {
+                lastFailure = ex.SocketErrorCode.ToString();
+            }
+
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(120),
+                cancellationToken);
+        }
+
+        throw new TimeoutException(
+            $"sing-box не открыл WFP backend SOCKS5 127.0.0.1:{socksPort} " +
+            $"за {timeout.TotalSeconds:0} секунд: {lastFailure}.");
     }
 
     private static string ReadAndValidateTunInterface(byte[] configurationUtf8)
@@ -315,6 +656,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     {
         DateTime deadline = DateTime.UtcNow + timeout;
         string lastFailure = "контрольный запрос ещё не выполнялся";
+        Exception? lastError = null;
 
         using HttpClientHandler handler = new()
         {
@@ -336,6 +678,12 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
             try
             {
+                if (_clashApiPort > 0)
+                {
+                    await VpnOutboundProbe.CheckAsync(client,_clashApiPort,_clashApiSecret,
+                        _connectivityProbeOutboundTag ?? throw new InvalidOperationException("VPN probe is unavailable"),attemptTimeout.Token);
+                    return;
+                }
                 using HttpRequestMessage request = new(HttpMethod.Get, ConnectivityProbeUri);
                 using HttpResponseMessage response = await client.SendAsync(
                     request,
@@ -347,13 +695,27 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
                 lastFailure = $"HTTP {(int)response.StatusCode}";
             }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            catch (SerpiumVPN.Relay.Diagnostics.ConnectionCheckException ex)
             {
+                lastError = ex;
+                lastFailure = ex.Message;
+                if (ex.Kind is SerpiumVPN.Relay.Diagnostics.ConnectionFailureKind.AuthenticationRejected or
+                    SerpiumVPN.Relay.Diagnostics.ConnectionFailureKind.ProbeUnavailable) throw;
+            }
+            catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                lastError = ex;
                 lastFailure = "таймаут контрольного HTTPS-запроса";
             }
             catch (HttpRequestException ex)
             {
+                lastError = ex;
                 lastFailure = SanitizeLogLine(ex.Message);
+            }
+            catch (Exception ex) when (ex is InvalidDataException or JsonException)
+            {
+                lastError = new SerpiumVPN.Relay.Diagnostics.ConnectionCheckException(SerpiumVPN.Relay.Diagnostics.ConnectionFailureKind.ProbeFailed, ex);
+                lastFailure = "движок не подтвердил VPN-соединение";
             }
 
             await Task.Delay(TimeSpan.FromMilliseconds(900), cancellationToken);
@@ -361,7 +723,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
         throw new TimeoutException(
             "TUN-интерфейс создан, но доступ через VPN не подтвердился за " +
-            $"{timeout.TotalSeconds:0} секунд: {lastFailure}.");
+            $"{timeout.TotalSeconds:0} секунд: {lastFailure}.", lastError);
     }
 
     private static async Task WaitForInterfaceAsync(
@@ -438,9 +800,443 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         if (string.IsNullOrWhiteSpace(line))
             return;
 
+        // Parse the raw line before privacy redaction. The UI only receives
+        // process identity + route class; destination is never forwarded.
+        TryForwardFlowRouteObservation(line);
+
         string safeLine = SanitizeLogLine(line);
         if (!string.IsNullOrWhiteSpace(safeLine))
             LogReceived?.Invoke(safeLine);
+    }
+
+    private void TryForwardFlowRouteObservation(string rawLine)
+    {
+        Match idMatch = FlowIdRegex.Match(rawLine);
+        if (!idMatch.Success)
+            return;
+
+        string flowId = idMatch.Groups["id"].Value;
+
+        Match processMatch = ProcessPathLogRegex.Match(rawLine);
+        if (processMatch.Success)
+        {
+            string processPath = NormalizeObservedProcessPath(
+                processMatch.Groups["path"].Value);
+
+            if (string.IsNullOrWhiteSpace(processPath) ||
+                processPath.StartsWith(
+                    ":",
+                    StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            lock (_flowObservationGate)
+            {
+                _flowProcessPaths[flowId] = processPath;
+
+                // Defensive bound for malformed/unmatched log sequences.
+                if (_flowProcessPaths.Count > 2048)
+                    _flowProcessPaths.Clear();
+            }
+
+            return;
+        }
+
+        Match outboundMatch = OutboundRouteLogRegex.Match(rawLine);
+        if (!outboundMatch.Success)
+            return;
+
+        string? processPathForFlow;
+        lock (_flowObservationGate)
+        {
+            if (!_flowProcessPaths.Remove(
+                    flowId,
+                    out processPathForFlow))
+            {
+                return;
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(processPathForFlow))
+            return;
+
+        string destination =
+            outboundMatch.Groups["destination"].Value.Trim();
+
+        Match portMatch =
+            DestinationPortRegex.Match(destination);
+
+        if (portMatch.Success &&
+            int.TryParse(
+                portMatch.Groups["port"].Value,
+                out int destinationPort) &&
+            destinationPort == 53)
+        {
+            // DNS alone is not proof that the application's actual traffic
+            // has switched route.
+            return;
+        }
+
+        string outboundTag =
+            outboundMatch.Groups["tag"].Value.Trim();
+
+        SingBoxObservedRoute route =
+            string.Equals(
+                outboundTag,
+                "direct",
+                StringComparison.OrdinalIgnoreCase)
+                ? SingBoxObservedRoute.Direct
+                : SingBoxObservedRoute.Vpn;
+
+        FlowRouteObserved?.Invoke(
+            new SingBoxFlowRouteObservation(
+                processPathForFlow,
+                route,
+                DateTimeOffset.Now));
+    }
+
+    private static string NormalizeObservedProcessPath(
+        string value)
+    {
+        string path = value.Trim().Trim('"');
+
+        if (path.StartsWith(
+                @"\\?\",
+                StringComparison.Ordinal))
+        {
+            path = path[4..];
+        }
+        else if (path.StartsWith(
+                     @"\??\",
+                     StringComparison.Ordinal))
+        {
+            path = path[4..];
+        }
+
+        return path;
+    }
+
+    private void StartActiveConnectionMonitor()
+    {
+        StopActiveConnectionMonitor();
+
+        if (_clashApiPort is < 1 or > 65535 ||
+            string.IsNullOrWhiteSpace(_clashApiSecret))
+            return;
+
+        _lastActiveConnectionFingerprint = string.Empty;
+        _connectionMonitorCts = new CancellationTokenSource();
+        CancellationToken token = _connectionMonitorCts.Token;
+        _connectionMonitorTask = Task.Run(
+            () => MonitorActiveConnectionsAsync(token),
+            CancellationToken.None);
+    }
+
+    private void StopActiveConnectionMonitor()
+    {
+        CancellationTokenSource? cts =
+            Interlocked.Exchange(ref _connectionMonitorCts, null);
+        if (cts is not null)
+        {
+            try { cts.Cancel(); } catch { }
+            cts.Dispose();
+        }
+
+        _connectionMonitorTask = null;
+        _lastActiveConnectionFingerprint = string.Empty;
+    }
+
+    private async Task MonitorActiveConnectionsAsync(
+        CancellationToken cancellationToken)
+    {
+        int consecutiveFailures = 0;
+
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            try
+            {
+                SingBoxActiveConnectionsSnapshot snapshot =
+                    await QueryActiveConnectionsAsync(cancellationToken);
+
+                consecutiveFailures = 0;
+                string fingerprint =
+                    BuildConnectionFingerprint(snapshot.Connections);
+
+                if (!string.Equals(
+                        fingerprint,
+                        _lastActiveConnectionFingerprint,
+                        StringComparison.Ordinal))
+                {
+                    _lastActiveConnectionFingerprint = fingerprint;
+                    ActiveConnectionsChanged?.Invoke(snapshot);
+                }
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch
+            {
+                consecutiveFailures++;
+                if (consecutiveFailures == 6)
+                {
+                    ActiveConnectionsChanged?.Invoke(
+                        new SingBoxActiveConnectionsSnapshot(
+                            DateTimeOffset.Now,
+                            Array.Empty<SingBoxActiveConnection>(),
+                            false));
+                }
+            }
+
+            try
+            {
+                await Task.Delay(500, cancellationToken);
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                return;
+            }
+        }
+    }
+
+    public async Task WaitForRoutingPolicyAsync(string activationProbe, CancellationToken cancellationToken = default)
+    {
+        if (_proxyBackendMode || !IsRunning)
+            throw new InvalidOperationException("Live TUN routing is unavailable.");
+        var client = new SfpLiveRoutingClient(_clashApiClient, _clashApiPort, _clashApiSecret);
+        await client.WaitForPolicyAsync(activationProbe, cancellationToken);
+    }
+
+    public async Task<int> ApplySfpLivePolicyAsync(string activationProbe, IEnumerable<string> processPaths,
+        bool desiredVpn, CancellationToken cancellationToken = default)
+    {
+        if (_proxyBackendMode || !IsRunning)
+            throw new InvalidOperationException("Live TUN routing is unavailable.");
+        int? processId = ProcessId;
+        var client = new SfpLiveRoutingClient(_clashApiClient, _clashApiPort, _clashApiSecret);
+        await client.WaitForPolicyAsync(activationProbe, cancellationToken);
+        int closed = await client.CloseStaleConnectionsAsync(processPaths, desiredVpn, cancellationToken);
+        if (!IsRunning || ProcessId != processId)
+            throw new InvalidOperationException("TUN session changed during the application switch.");
+        _lastActiveConnectionFingerprint = string.Empty;
+        LogReceived?.Invoke($"SFP live policy confirmed; closed old application connections: {closed}.");
+        return closed;
+    }
+
+    public async Task<int> CloseOppositeRouteConnectionsAsync(
+        IEnumerable<string> processPaths,
+        SingBoxObservedRoute desiredRoute,
+        CancellationToken cancellationToken = default)
+    {
+        if (_proxyBackendMode ||
+            _clashApiPort is < 1 or > 65535 ||
+            string.IsNullOrWhiteSpace(_clashApiSecret))
+        {
+            return 0;
+        }
+
+        HashSet<string> normalizedPaths = new(
+            processPaths
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Select(NormalizeObservedProcessPath),
+            StringComparer.OrdinalIgnoreCase);
+
+        if (normalizedPaths.Count == 0)
+            return 0;
+
+        int closed = 0;
+
+        for (int pass = 0; pass < 2; pass++)
+        {
+            SingBoxActiveConnectionsSnapshot snapshot =
+                await QueryActiveConnectionsAsync(cancellationToken);
+
+            List<SingBoxActiveConnection> stale =
+                snapshot.Connections
+                    .Where(connection =>
+                        connection.Route != desiredRoute &&
+                        normalizedPaths.Contains(
+                            NormalizeObservedProcessPath(connection.ProcessPath)))
+                    .ToList();
+
+            if (stale.Count == 0)
+                break;
+
+            foreach (SingBoxActiveConnection connection in stale)
+            {
+                await CloseActiveConnectionAsync(
+                    connection.Id,
+                    cancellationToken);
+                closed++;
+            }
+
+            if (pass == 0)
+                await Task.Delay(120, cancellationToken);
+        }
+
+        _lastActiveConnectionFingerprint = string.Empty;
+        return closed;
+    }
+
+    private async Task CloseActiveConnectionAsync(
+        string connectionId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(connectionId))
+            return;
+
+        using HttpRequestMessage request = new(
+            HttpMethod.Delete,
+            $"http://127.0.0.1:{_clashApiPort}/connections/" +
+            Uri.EscapeDataString(connectionId));
+
+        request.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer",
+                _clashApiSecret);
+
+        using HttpResponseMessage response =
+            await _clashApiClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+    }
+
+    private async Task<SingBoxActiveConnectionsSnapshot>
+        QueryActiveConnectionsAsync(
+            CancellationToken cancellationToken)
+    {
+        using HttpRequestMessage request = new(
+            HttpMethod.Get,
+            $"http://127.0.0.1:{_clashApiPort}/connections");
+
+        request.Headers.Authorization =
+            new System.Net.Http.Headers.AuthenticationHeaderValue(
+                "Bearer",
+                _clashApiSecret);
+
+        using HttpResponseMessage response =
+            await _clashApiClient.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                cancellationToken);
+
+        response.EnsureSuccessStatusCode();
+
+        await using Stream stream =
+            await response.Content.ReadAsStreamAsync(cancellationToken);
+        using JsonDocument document =
+            await JsonDocument.ParseAsync(
+                stream,
+                cancellationToken: cancellationToken);
+
+        List<SingBoxActiveConnection> result = new();
+
+        if (!document.RootElement.TryGetProperty(
+                "connections",
+                out JsonElement array) ||
+            array.ValueKind != JsonValueKind.Array)
+        {
+            return new SingBoxActiveConnectionsSnapshot(
+                DateTimeOffset.Now,
+                result,
+                true);
+        }
+
+        foreach (JsonElement item in array.EnumerateArray())
+        {
+            string id =
+                item.TryGetProperty("id", out JsonElement idElement)
+                    ? idElement.GetString() ?? string.Empty
+                    : string.Empty;
+
+            if (string.IsNullOrWhiteSpace(id) ||
+                !item.TryGetProperty(
+                    "metadata",
+                    out JsonElement metadata) ||
+                metadata.ValueKind != JsonValueKind.Object)
+                continue;
+
+            string processPath =
+                metadata.TryGetProperty(
+                    "processPath",
+                    out JsonElement processElement)
+                    ? processElement.GetString() ?? string.Empty
+                    : string.Empty;
+
+            processPath = NormalizeObservedProcessPath(processPath);
+            if (string.IsNullOrWhiteSpace(processPath) ||
+                processPath.StartsWith(":", StringComparison.Ordinal))
+                continue;
+
+            int destinationPort = 0;
+            if (metadata.TryGetProperty(
+                    "destinationPort",
+                    out JsonElement portElement))
+            {
+                if (portElement.ValueKind == JsonValueKind.String)
+                    int.TryParse(portElement.GetString(), out destinationPort);
+                else if (portElement.ValueKind == JsonValueKind.Number)
+                    portElement.TryGetInt32(out destinationPort);
+            }
+
+            if (destinationPort == 53)
+                continue;
+
+            result.Add(new SingBoxActiveConnection(
+                id,
+                processPath,
+                ResolveConnectionRoute(item),
+                SerpiumVPN.Relay.Routing.UserApplicationPolicy.IsInternetFlow(metadata)));
+        }
+
+        return new SingBoxActiveConnectionsSnapshot(
+            DateTimeOffset.Now,
+            result,
+            true);
+    }
+
+    private static SingBoxObservedRoute ResolveConnectionRoute(
+        JsonElement connection)
+    {
+        if (connection.TryGetProperty(
+                "chains",
+                out JsonElement chains) &&
+            chains.ValueKind == JsonValueKind.Array)
+        {
+            foreach (JsonElement chain in chains.EnumerateArray())
+            {
+                if (string.Equals(
+                        chain.GetString(),
+                        "direct",
+                        StringComparison.OrdinalIgnoreCase))
+                    return SingBoxObservedRoute.Direct;
+            }
+        }
+
+        return SingBoxObservedRoute.Vpn;
+    }
+
+    private static string BuildConnectionFingerprint(
+        IReadOnlyList<SingBoxActiveConnection> connections) =>
+        string.Join(
+            "|",
+            connections
+                .OrderBy(item => item.Id, StringComparer.Ordinal)
+                .Select(item =>
+                    item.Id + ":" + item.Route + ":" + item.ProcessPath + ":" + item.UsesInternet));
+
+    private void ClearFlowObservations()
+    {
+        lock (_flowObservationGate)
+        {
+            _flowProcessPaths.Clear();
+        }
     }
 
     private static string SanitizeLogLine(string value)
@@ -448,7 +1244,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         if (string.IsNullOrWhiteSpace(value))
             return "безопасное описание отсутствует";
 
-        string sanitized = SensitiveAssignmentRegex.Replace(value, "$1=<hidden>");
+        string sanitized = SensitiveAssignmentRegex.Replace(SensitiveDiagnosticRedactor.RedactText(value), "$1=<hidden>");
         sanitized = UuidRegex.Replace(sanitized, "<uuid>");
         sanitized = Ipv4Regex.Replace(sanitized, "<ip>");
         sanitized = HostNameRegex.Replace(sanitized, "<host>");
@@ -467,6 +1263,8 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     {
         CloseKillOnCloseJob();
         DeleteStateFile();
+        StopActiveConnectionMonitor();
+        ClearFlowObservations();
 
         if (State is RelayGatewayState.Stopping or RelayGatewayState.Stopped)
             return;
@@ -815,8 +1613,10 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         }
 
         _disposed = true;
+        StopActiveConnectionMonitor();
         _process?.Dispose();
         _process = null;
+        _clashApiClient.Dispose();
     }
 
     private sealed class SessionProcessState

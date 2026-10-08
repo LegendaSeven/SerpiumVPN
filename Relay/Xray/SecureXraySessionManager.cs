@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -18,10 +18,10 @@ namespace SerpiumVPN.Relay.Xray;
 /// Security boundary around the existing Xray session manager.
 ///
 /// The wrapped manager still builds and launches Xray, but it never receives
-/// the legacy build-output config path. The temporary config is forced into a
-/// private CurrentUser LocalAppData directory, the actual TCP listener owner is verified against either the source binary
+/// the legacy build-output config path. Configuration travels through stdin;
+/// runtime state stays in a private CurrentUser LocalAppData directory. The actual TCP listener owner is verified against either the source binary
 /// or the fixed managed LocalAppData xray-key-client.exe copy with an exact SHA-256 match, and
-/// every known plaintext config is deleted immediately after validation.
+/// legacy plaintext configs are removed before and after startup.
 /// </summary>
 public sealed class SecureXraySessionManager : IDisposable
 {
@@ -82,6 +82,17 @@ public sealed class SecureXraySessionManager : IDisposable
 
     public string? LastError =>
         _securityError ?? _inner.LastError;
+
+    public int? ProcessId
+    {
+        get
+        {
+            lock (_sync)
+            {
+                return _verifiedOwnerProcessId;
+            }
+        }
+    }
 
     public bool HasLiveProcess
     {

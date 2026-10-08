@@ -1,0 +1,21 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <SolidColorBrush x:Key="Theme.Background" Color="#0B0F16"/>
+    <SolidColorBrush x:Key="Theme.Surface" Color="#191D2A"/>
+    <SolidColorBrush x:Key="Theme.Secondary" Color="#2D3243"/>
+    <SolidColorBrush x:Key="Theme.Input" Color="#111621"/>
+    <SolidColorBrush x:Key="Theme.Border" Color="#383D4F"/>
+    <SolidColorBrush x:Key="Theme.Divider" Color="#2D3242"/>
+    <SolidColorBrush x:Key="Theme.Text" Color="#F7F7FA"/>
+    <SolidColorBrush x:Key="Theme.Muted" Color="#B4B5C2"/>
+    <SolidColorBrush x:Key="Theme.Accent" Color="#54D395"/>
+    <SolidColorBrush x:Key="Theme.OnAccent" Color="#102E20"/>
+    <SolidColorBrush x:Key="Theme.Success" Color="#54D395"/>
+    <SolidColorBrush x:Key="Theme.Error" Color="#FFAAA6"/>
+    <SolidColorBrush x:Key="Theme.ToggleOff" Color="#4A5065"/>
+    <SolidColorBrush x:Key="Theme.ToggleKnob" Color="#F7F7FA"/>
+    <SolidColorBrush x:Key="Theme.ScrollThumb" Color="#646A80"/>
+    <SolidColorBrush x:Key="Theme.HoverOverlay" Color="#14FFFFFF"/>
+    <SolidColorBrush x:Key="Theme.PressedOverlay" Color="#24000000"/>
+    <SolidColorBrush x:Key="Theme.Focus" Color="#A5F1CB"/>
+</ResourceDictionary>

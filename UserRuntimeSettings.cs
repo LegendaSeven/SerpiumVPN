@@ -6,18 +6,12 @@ namespace SerpiumVPN
 {
     public sealed class UserRuntimeSettings
     {
-        public bool CheckYouTube { get; set; } = true;
-        public bool CheckDiscord { get; set; } = true;
-        public bool AutoSwitchStrategies { get; set; } = false;
-        public bool AutoUpdateFiles { get; set; } = true;
+        public bool AutoUpdateTelegramProxy { get; set; } = true;
         public bool AutoUpdateProgram { get; set; } = true;
         public bool AutoCheckRelayComponents { get; set; } = true;
         public DateTimeOffset? LastRelayComponentCheckUtc { get; set; }
         public string? LastKnownSingBoxRelease { get; set; }
         public string? LastKnownXrayRelease { get; set; }
-        public bool AutoStartLastStrategy { get; set; } = false;
-        public string? LastStrategyName { get; set; }
-        public DateTime? LastStrategySavedAt { get; set; }
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
@@ -35,7 +29,17 @@ namespace SerpiumVPN
                     return new UserRuntimeSettings();
 
                 string json = File.ReadAllText(SettingsPath);
-                return JsonSerializer.Deserialize<UserRuntimeSettings>(json) ?? new UserRuntimeSettings();
+                var settings = JsonSerializer.Deserialize<UserRuntimeSettings>(json) ?? new UserRuntimeSettings();
+                using var document = JsonDocument.Parse(json);
+                // Preserve the component update preference saved by earlier versions.
+                if (document.RootElement.ValueKind == JsonValueKind.Object &&
+                    !document.RootElement.TryGetProperty(nameof(AutoUpdateTelegramProxy), out _) &&
+                    document.RootElement.TryGetProperty("AutoUpdateFiles", out var oldPreference) &&
+                    oldPreference.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                {
+                    settings.AutoUpdateTelegramProxy = oldPreference.GetBoolean();
+                }
+                return settings;
             }
             catch
             {

@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "owner": "SerpiumVPN",
+  "component": "Serpium.Flow",
+  "productVersion": "1.0.56.6",
+  "protocolAbi": "0x00040000",
+  "platform": "x64",
+  "sourceBuildMode": "direct-cl-link",
+  "sourceWfpMode": "guarded-tcp-udp-route-enforcement-domain-bridge-quic-fallback-datagram-core",
+  "generatedAtUtc": "2026-10-08T18:55:01.1972926Z",
+  "installState": "PACKAGED_NOT_INSTALLED",
+  "signingState": "UNCHANGED",
+  "files": [
+    {
+      "name": "Serpium.Flow.Service.exe",
+      "sha256": "ea021942db1063e67c34b3cf9fe8d36fc01863bf5003efb24f1855fad0f3c46d",
+      "size": 335872
+    },
+    {
+      "name": "Serpium.Flow.Driver.sys",
+      "sha256": "9ccf5ab2b5e1468e1a41cf1144d71cdd2e7959b5bf2a29cae289a334fad42d4d",
+      "size": 35840
+    },
+    {
+      "name": "Serpium.Flow.Driver.inf",
+      "sha256": "166dc9ad945a3b858931c113b3fcb9db1237fd441e6369a1b250f3c7e4f321be",
+      "size": 1195
+    },
+    {
+      "name": "serpium.flow.driver.cat",
+      "sha256": "c17f5ad4afe9b16f01e76c2d2447ec98e3192b9e32346c740f7135ff3b1a15c1",
+      "size": 1120
+    },
+    {
+      "name": "BUILD_MANIFEST.json",
+      "sha256": "a56fcef1d9b4446e714043c4dab55ee8c29aaa06ded083a7f7fa2c1996f1c0f1",
+      "size": 4018
+    }
+  ]
+}

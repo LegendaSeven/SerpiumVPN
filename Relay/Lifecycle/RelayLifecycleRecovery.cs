@@ -1,9 +1,10 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using SerpiumVPN.Relay.Routing;
 
 namespace SerpiumVPN.Relay.Lifecycle;
 
@@ -16,7 +17,8 @@ public static class RelayLifecycleRecovery
     private static readonly string[] OwnedProcessNames =
     [
         "xray",
-        "sing-box"
+        "sing-box",
+        "Serpium.Flow.Service"
     ];
 
     private static readonly string[] GeneratedRuntimeFiles =
@@ -45,11 +47,23 @@ public static class RelayLifecycleRecovery
                     cancellationToken.ThrowIfCancellationRequested();
 
                     string? executablePath = TryGetExecutablePath(process);
-                    if (string.IsNullOrWhiteSpace(executablePath) ||
-                        !IsInsideDirectory(executablePath, relayDirectory))
-                    {
+                    if (string.IsNullOrWhiteSpace(executablePath))
                         continue;
-                    }
+
+                    bool relayOwned =
+                        IsInsideDirectory(
+                            executablePath,
+                            relayDirectory);
+                    bool wfpOwned =
+                        string.Equals(
+                            processName,
+                            "Serpium.Flow.Service",
+                            StringComparison.OrdinalIgnoreCase) &&
+                        WfpRuntimeOwner.IsOwnedExecutablePath(
+                            executablePath);
+
+                    if (!relayOwned && !wfpOwned)
+                        continue;
 
                     try
                     {
@@ -74,6 +88,7 @@ public static class RelayLifecycleRecovery
 
         int filesDeleted = DeleteGeneratedSecrets(applicationBaseDirectory);
         filesDeleted += await DeletePrivateRuntimeResidueWithRetryAsync(cancellationToken).ConfigureAwait(false);
+        filesDeleted += WfpRuntimeOwner.CleanupEphemeralState();
         return new RelayLifecycleCleanupResult(processesStopped, filesDeleted);
     }
 

@@ -1,4 +1,4 @@
-# Build outputs
+﻿# Build outputs
 
 /bin/
 
@@ -79,8 +79,6 @@
 
 # Serpium runtime binaries are source assets, not build output
 !bin_files/
-!bin_files/bin/
-!bin_files/bin/**
 !bin_files/relay/
 !bin_files/relay/**
 
@@ -187,11 +185,18 @@ appsettings.local.json
 publish/
 **/bin/
 **/obj/
-!bin_files/bin/
-!bin_files/bin/**
 Engines/SampleEngine/Build/
 *.user
 *.suo
 bin_files/relay/state/*
 !bin_files/relay/state/.gitkeep
-bin_files/lists/*.backup
+
+# Local patch backups and native build output
+.patch-backups/
+.serpium-backups/
+.serpium-patch-backups/
+Native/**/artifacts/
+Native/**/logs/
+/setup.inf
+/setup.rpt
+Native/**/backups/

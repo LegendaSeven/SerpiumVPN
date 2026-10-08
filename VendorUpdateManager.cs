@@ -1,7 +1,6 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
@@ -14,7 +13,6 @@ namespace SerpiumVPN
 {
     public sealed class VendorUpdateManager
     {
-        private const string ZapretRepo = "Flowseal/zapret-discord-youtube";
         private const string TgWsRepo = "Flowseal/tg-ws-proxy";
 
         private readonly string _basePath = AppDomain.CurrentDomain.BaseDirectory;
@@ -36,27 +34,7 @@ namespace SerpiumVPN
 
             using HttpClient client = CreateHttpClient();
 
-            GitHubRelease zapretRelease = await GetLatestReleaseAsync(client, ZapretRepo, cancellationToken);
-            bool zapretUpdated = false;
             List<string> skippedFiles = new List<string>();
-
-            if (!string.Equals(metadata.ZapretTag, zapretRelease.TagName, StringComparison.OrdinalIgnoreCase))
-            {
-                progress?.Report($"Обновляем zapret до {zapretRelease.TagName}...");
-                GitHubAsset asset = SelectZapretAsset(zapretRelease);
-                IReadOnlyList<string> currentSkippedFiles = await UpdateZapretAsync(client, asset, cancellationToken);
-                skippedFiles.AddRange(currentSkippedFiles);
-
-                if (currentSkippedFiles.Count == 0)
-                {
-                    metadata.ZapretTag = zapretRelease.TagName;
-                    metadata.ZapretAssetName = asset.Name;
-                }
-
-                zapretUpdated = true;
-            }
-
-            items.Add(new VendorUpdateItem("zapret-discord-youtube", zapretRelease.TagName, zapretUpdated));
 
             GitHubRelease tgRelease = await GetLatestReleaseAsync(client, TgWsRepo, cancellationToken);
             bool tgUpdated = false;
@@ -79,7 +57,7 @@ namespace SerpiumVPN
 
             items.Add(new VendorUpdateItem("tg-ws-proxy", tgRelease.TagName, tgUpdated));
 
-            if (zapretUpdated || tgUpdated)
+            if (tgUpdated)
             {
                 metadata.UpdatedAtUtc = DateTimeOffset.UtcNow;
                 SaveMetadata(metadata);
@@ -88,53 +66,6 @@ namespace SerpiumVPN
             return new VendorUpdateSummary(items, skippedFiles);
         }
 
-        private async Task<IReadOnlyList<string>> UpdateZapretAsync(HttpClient client, GitHubAsset asset, CancellationToken cancellationToken)
-        {
-            string tempZipPath = Path.Combine(Path.GetTempPath(), $"serpium_zapret_{Guid.NewGuid():N}.zip");
-            List<string> skippedFiles = new List<string>();
-
-            try
-            {
-                await DownloadFileAsync(client, asset.BrowserDownloadUrl, tempZipPath, cancellationToken);
-
-                using ZipArchive archive = ZipFile.OpenRead(tempZipPath);
-
-                foreach (ZipArchiveEntry entry in archive.Entries)
-                {
-                    string? destination = ResolveZapretDestination(entry);
-
-                    if (destination == null)
-                        continue;
-
-                    Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-
-                    if (IsOptionalLockedRuntimeFile(destination) && IsFileLocked(destination))
-                    {
-                        skippedFiles.Add(Path.GetFileName(destination));
-                        continue;
-                    }
-
-                    try
-                    {
-                        ExtractEntryReplacingFile(entry, destination);
-                    }
-                    catch (IOException) when (IsOptionalLockedRuntimeFile(destination))
-                    {
-                        skippedFiles.Add(Path.GetFileName(destination));
-                    }
-                    catch (UnauthorizedAccessException) when (IsOptionalLockedRuntimeFile(destination))
-                    {
-                        skippedFiles.Add(Path.GetFileName(destination));
-                    }
-                }
-            }
-            finally
-            {
-                TryDelete(tempZipPath);
-            }
-
-            return skippedFiles;
-        }
 
         private async Task<IReadOnlyList<string>> UpdateTgWsAsync(HttpClient client, GitHubAsset asset, CancellationToken cancellationToken)
         {
@@ -168,82 +99,6 @@ namespace SerpiumVPN
             return skippedFiles;
         }
 
-        private static void ExtractEntryReplacingFile(ZipArchiveEntry entry, string destination)
-        {
-            string tempPath = Path.Combine(
-                Path.GetDirectoryName(destination)!,
-                $"{Path.GetFileName(destination)}.{Guid.NewGuid():N}.tmp"
-            );
-
-            try
-            {
-                entry.ExtractToFile(tempPath, overwrite: true);
-
-                if (File.Exists(destination))
-                    File.Delete(destination);
-
-                File.Move(tempPath, destination);
-            }
-            finally
-            {
-                TryDelete(tempPath);
-            }
-        }
-
-        private string? ResolveZapretDestination(ZipArchiveEntry entry)
-        {
-            if (string.IsNullOrEmpty(entry.Name))
-                return null;
-
-            string relative = NormalizeArchivePath(entry.FullName);
-            string fileName = Path.GetFileName(relative);
-
-            if (IsUserOwnedFile(fileName))
-                return null;
-
-            if (TryGetSubPath(relative, "bin", out string binSubPath))
-                return ResolveSafeDestination(Path.Combine(_binFilesPath, "bin"), binSubPath);
-
-            if (TryGetSubPath(relative, "lists", out string listsSubPath))
-                return ResolveSafeDestination(Path.Combine(_binFilesPath, "lists"), listsSubPath);
-
-            if (fileName.Equals("service.bat", StringComparison.OrdinalIgnoreCase) ||
-                (fileName.StartsWith("general", StringComparison.OrdinalIgnoreCase) &&
-                 fileName.EndsWith(".bat", StringComparison.OrdinalIgnoreCase)))
-            {
-                return ResolveSafeDestination(Path.Combine(_binFilesPath, "bats"), fileName);
-            }
-
-            return null;
-        }
-
-        private static string? ResolveSafeDestination(string root, string relativePath)
-        {
-            string rootFullPath = Path.GetFullPath(root);
-            string destination = Path.GetFullPath(Path.Combine(rootFullPath, relativePath));
-            string rootWithSeparator = rootFullPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-
-            if (!destination.StartsWith(rootWithSeparator, StringComparison.OrdinalIgnoreCase))
-                return null;
-
-            return destination;
-        }
-
-        private static bool IsUserOwnedFile(string fileName)
-        {
-            return fileName.Equals("list-general-user.txt", StringComparison.OrdinalIgnoreCase) ||
-                   fileName.Equals("list-exclude-user.txt", StringComparison.OrdinalIgnoreCase) ||
-                   fileName.Equals("ipset-exclude-user.txt", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsOptionalLockedRuntimeFile(string path)
-        {
-            string fileName = Path.GetFileName(path);
-
-            return fileName.Equals("WinDivert64.sys", StringComparison.OrdinalIgnoreCase) ||
-                   fileName.Equals("WinDivert.dll", StringComparison.OrdinalIgnoreCase) ||
-                   fileName.Equals("winws.exe", StringComparison.OrdinalIgnoreCase);
-        }
 
         private static bool IsFileLocked(string path)
         {
@@ -265,38 +120,6 @@ namespace SerpiumVPN
             }
         }
 
-        private static string NormalizeArchivePath(string path)
-        {
-            return path.Replace('\\', '/').TrimStart('/');
-        }
-
-        private static bool TryGetSubPath(string relative, string folderName, out string subPath)
-        {
-            string[] parts = relative.Split('/', StringSplitOptions.RemoveEmptyEntries);
-
-            for (int i = 0; i < parts.Length - 1; i++)
-            {
-                if (!parts[i].Equals(folderName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                subPath = Path.Combine(parts.Skip(i + 1).ToArray());
-                return !string.IsNullOrWhiteSpace(subPath);
-            }
-
-            subPath = string.Empty;
-            return false;
-        }
-
-        private static GitHubAsset SelectZapretAsset(GitHubRelease release)
-        {
-            GitHubAsset? asset = release.Assets
-                .Where(asset => asset.Name.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                .OrderByDescending(asset => asset.Name.Contains("zapret", StringComparison.OrdinalIgnoreCase))
-                .ThenBy(asset => asset.Name)
-                .FirstOrDefault();
-
-            return asset ?? throw new InvalidOperationException("В последнем релизе zapret не найден ZIP-архив для обновления.");
-        }
 
         private static GitHubAsset SelectTgWsAsset(GitHubRelease release)
         {
@@ -412,12 +235,6 @@ namespace SerpiumVPN
 
     internal sealed class VendorVersionMetadata
     {
-        [JsonPropertyName("zapret_tag")]
-        public string? ZapretTag { get; set; }
-
-        [JsonPropertyName("zapret_asset_name")]
-        public string? ZapretAssetName { get; set; }
-
         [JsonPropertyName("tg_ws_tag")]
         public string? TgWsTag { get; set; }
 

@@ -20,7 +20,9 @@ public sealed class ProviderRuntimeProfile : IDisposable
         int outboundCount,
         int routeRuleCount,
         int dnsServerCount,
-        string safeSchemaSummary = "")
+        string safeSchemaSummary = "",
+        int clashApiPort = 0,
+        string clashApiSecret = "")
     {
         if (string.IsNullOrWhiteSpace(providerName))
             throw new ArgumentException("Имя провайдера не указано.", nameof(providerName));
@@ -49,6 +51,16 @@ public sealed class ProviderRuntimeProfile : IDisposable
         SafeSchemaSummary = string.IsNullOrWhiteSpace(safeSchemaSummary)
             ? "Структура provider JSON ещё не исследована."
             : safeSchemaSummary.Trim();
+
+        if (clashApiPort is < 0 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(clashApiPort));
+        if (clashApiPort > 0 && string.IsNullOrWhiteSpace(clashApiSecret))
+            throw new ArgumentException(
+                "Для локального Clash API требуется секрет.",
+                nameof(clashApiSecret));
+
+        ClashApiPort = clashApiPort;
+        ClashApiSecret = clashApiSecret ?? string.Empty;
     }
 
     public string ProviderName { get; }
@@ -60,6 +72,8 @@ public sealed class ProviderRuntimeProfile : IDisposable
     public int RouteRuleCount { get; }
     public int DnsServerCount { get; }
     public string SafeSchemaSummary { get; }
+    public int ClashApiPort { get; }
+    public string ClashApiSecret { get; }
     public int ConfigurationByteCount => _configurationUtf8?.Length ?? 0;
     public bool IsDisposed => _configurationUtf8 is null;
 

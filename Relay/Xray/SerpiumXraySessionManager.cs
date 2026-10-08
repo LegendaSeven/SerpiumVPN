@@ -4,6 +4,9 @@ using System.Net.Sockets;
 using System.Text.Json;
 using SerpiumVPN.Relay.Parser;
 using System.IO;
+using System.Text;
+using System.Security.Cryptography;
+using SerpiumVPN.Relay.Diagnostics;
 
 namespace SerpiumVPN.Relay.Xray;
 
@@ -75,7 +78,6 @@ public sealed class SerpiumXraySessionManager : IDisposable
 
             File.Copy(sourceXrayPath, _sessionExePath, overwrite: true);
             string json = SerpiumXrayConfigBuilder.Build(profile, socksPort, logDirectory);
-            await File.WriteAllTextAsync(configPath, json, cancellationToken);
 
             ProcessStartInfo startInfo = new()
             {
@@ -83,12 +85,13 @@ public sealed class SerpiumXraySessionManager : IDisposable
                 WorkingDirectory = sessionDirectory,
                 UseShellExecute = false,
                 CreateNoWindow = true,
+                RedirectStandardInput = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
             startInfo.ArgumentList.Add("run");
             startInfo.ArgumentList.Add("-config");
-            startInfo.ArgumentList.Add(configPath);
+            startInfo.ArgumentList.Add("stdin:");
 
             _process = new Process
             {
@@ -105,6 +108,29 @@ public sealed class SerpiumXraySessionManager : IDisposable
             SaveState(_process);
             _process.BeginOutputReadLine();
             _process.BeginErrorReadLine();
+
+            byte[] configuration = Encoding.UTF8.GetBytes(json);
+            try
+            {
+                using var inputTimeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                inputTimeout.CancelAfter(TimeSpan.FromSeconds(10));
+                Process inputProcess = _process;
+                // Closing a stuck child unblocks even a full anonymous stdin pipe.
+                using var registration = inputTimeout.Token.Register(() =>
+                {
+                    try { if (!inputProcess.HasExited) inputProcess.Kill(entireProcessTree: true); }
+                    catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                });
+                try
+                {
+                    await inputProcess.StandardInput.BaseStream.WriteAsync(configuration, inputTimeout.Token);
+                    inputProcess.StandardInput.Close();
+                }
+                catch (Exception error) when (inputTimeout.IsCancellationRequested && error is IOException or InvalidOperationException)
+                { inputTimeout.Token.ThrowIfCancellationRequested(); throw; }
+                inputTimeout.Token.ThrowIfCancellationRequested();
+            }
+            finally { CryptographicOperations.ZeroMemory(configuration); }
 
             await WaitForPortAsync(
                 IPAddress.Loopback,
@@ -128,7 +154,7 @@ public sealed class SerpiumXraySessionManager : IDisposable
         }
         catch (Exception ex)
         {
-            LastError = ex.Message;
+            LastError = SensitiveDiagnosticRedactor.RedactText(ex.Message);
             TryKillCurrentProcess();
             DeleteSensitiveRuntimeFiles();
             SetState(RelayGatewayState.Failed);
@@ -165,7 +191,7 @@ public sealed class SerpiumXraySessionManager : IDisposable
     private void ForwardLog(string? line)
     {
         if (!string.IsNullOrWhiteSpace(line))
-            LogReceived?.Invoke(line);
+            LogReceived?.Invoke(SensitiveDiagnosticRedactor.RedactText(line));
     }
 
     private void HandleUnexpectedExit()

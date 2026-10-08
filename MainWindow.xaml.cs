@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Diagnostics;
@@ -37,22 +37,25 @@ using SerpiumVPN.Relay.Xray;
 
 namespace SerpiumVPN
 {
+    internal readonly record struct RoutingActiveFlowCounts(
+        int Vpn,
+        int Direct)
+    {
+        public int Total => Vpn + Direct;
+    }
+
     /// <summary>
     /// Interaction logic for MainWindow.xaml
     /// </summary>
     public partial class MainWindow : Window
     {
-        private readonly ZapretManager _zapretManager;
         private readonly TelegramProxyManager _telegramProxyManager;
         private readonly VendorUpdateManager _vendorUpdateManager;
         private readonly AppUpdateManager _appUpdateManager;
-        private readonly DispatcherTimer _strategyMonitorTimer;
         private readonly DispatcherTimer _relayLifecycleTimer;
         private readonly UserRuntimeSettings _settings;
         private Forms.NotifyIcon? _trayIcon;
-        private CancellationTokenSource? _strategySelectionCts;
         private bool _isRealExit;
-        private bool _isMonitoringStrategy;
         private bool _isLoadingRuntimeSettings;
         private readonly XrayGatewayManager _xrayGatewayManager = new();
         private readonly XrayClientManager _xrayClientManager = new();
@@ -66,7 +69,9 @@ namespace SerpiumVPN
         private readonly SecureXraySessionManager _serpiumXraySessionManager = new();
         private readonly SecureProfileVault _secureProfileVault = new();
         private readonly SecureRoutingRegistry _secureRoutingRegistry = new();
-        private readonly SecureRoutingRuleSetRuntime _routingRuleSetRuntime = new();
+        private readonly SecureRoutingRuleSetRuntime _routingRuleSetRuntime = new()
+        { FullTunnelWhenEmpty = false };
+        private readonly WfpRoutingController _wfpRoutingController = new();
         private readonly RelayComponentManager _relayComponentManager = new();
         private RelayComponentSettingsWindow? _relayComponentSettingsWindow;
         private IReadOnlyList<RoutingRegistryEntry> _routingRegistryEntries =
@@ -83,7 +88,29 @@ namespace SerpiumVPN
         private Guid? _activeSavedProfileId;
         private int? _activeSavedProfileSocksPort;
         private bool _activeSavedProfileUsesRoutingTun;
+        private bool _activeSavedProfileUsesWfpRouting;
         private bool _activeRoutingHotReloadEnabled;
+        private string? _wfpAutomaticFallbackReason;
+        private DateTimeOffset? _wfpAutomaticFallbackAt;
+
+        // Desired rule state is not the same as actual network state.
+        // A toggle remains pending until sing-box observes a real new flow.
+        private Guid? _pendingRoutingFlowEntryId;
+        private bool _pendingRoutingFlowExpectedVpn;
+        private bool _pendingRoutingFlowFullTunnel;
+        private string? _pendingRoutingFlowDisplayName;
+        private bool? _pendingRoutingFlowLastObservedVpn;
+        private string? _lastRoutingFlowConfirmationText;
+        private readonly Dictionary<Guid, (bool ViaVpn, DateTimeOffset ObservedAt)>
+            _observedRoutingApplicationRoutes = new();
+        private readonly Dictionary<Guid, RoutingActiveFlowCounts>
+            _activeRoutingApplicationFlows = new();
+        private bool _activeConnectionMonitorAvailable = true;
+        private int _lastRoutingFlowClosedCount;
+        private bool _pendingExpectedRouteFlowObserved;
+        private bool _pendingPostSwitchSnapshotSeen;
+        private int _routingFlowTransitionGeneration;
+
         private int _activeSavedProfileRoutingRuleCount;
         private IReadOnlyDictionary<Guid, string> _activeSavedProfileRoutingRuleLabels =
             new Dictionary<Guid, string>();
@@ -98,14 +125,14 @@ namespace SerpiumVPN
 
         public static Action<string>? LocalUpdateRequested;
 
-        // Используем IOPath вместо Path, ведем строго к файлу в bin_files
-        private readonly string _listFilePath = IOPath.Combine(AppDomain.CurrentDomain.BaseDirectory, "bin_files", "lists", "list-general-user.txt");
 
         public MainWindow()
         {
+            InitializeAppearance();
             InitializeComponent();
+            SimpleHome.SetTheme(_appearanceTheme);
+            SimpleHome.ThemeToggleRequested += ThemeToggleRequested;
             Title = "Serpium VPN";
-            _zapretManager = new ZapretManager();
             _telegramProxyManager = new TelegramProxyManager();
             _vendorUpdateManager = new VendorUpdateManager();
             _appUpdateManager = new AppUpdateManager();
@@ -131,11 +158,20 @@ namespace SerpiumVPN
                 RelayClientLogTextBox.AppendText(SensitiveDiagnosticRedactor.RedactText(line) + Environment.NewLine);
                 RelayClientLogTextBox.ScrollToEnd();
             });
-            _strategyMonitorTimer = new DispatcherTimer
+            _serpiumSingBoxSessionManager.ActiveConnectionsChanged += snapshot =>
+                SafeDispatcherInvoke(() =>
+                    HandleActiveTunConnectionsSnapshot(snapshot));
+
+            _serpiumSingBoxSessionManager.FlowRouteObserved += observation =>
+                SafeDispatcherInvoke(() =>
+                    HandleExpectedRouteFlowEvidence(observation));
+            _wfpRoutingController.LogReceived += line => SafeDispatcherInvoke(() =>
             {
-                Interval = TimeSpan.FromMinutes(2)
-            };
-            _strategyMonitorTimer.Tick += StrategyMonitorTimer_TickAsync;
+                RelayClientLogTextBox.AppendText(
+                    SensitiveDiagnosticRedactor.RedactText(line) +
+                    Environment.NewLine);
+                RelayClientLogTextBox.ScrollToEnd();
+            });
             _relayLifecycleTimer = new DispatcherTimer
             {
                 Interval = TimeSpan.FromSeconds(2)
@@ -145,10 +181,9 @@ namespace SerpiumVPN
             this.Closing += MainWindow_Closing;
             this.StateChanged += MainWindow_StateChanged;
 
-            // Вызываем правильный метод загрузки при старте
-            LoadHostsList();
             LoadRuntimeSettingsIntoUi();
             InitializeTrayIcon();
+            InitializeSimpleHome();
 
             Loaded += MainWindow_LoadedAsync;
             SourceInitialized += MainWindow_SourceInitialized;
@@ -168,12 +203,15 @@ namespace SerpiumVPN
         [return: MarshalAs(UnmanagedType.Bool)]
         private static extern bool DeleteObject(IntPtr objectHandle);
 
-        private void MainWindow_SourceInitialized(object? sender, EventArgs e)
+        private void MainWindow_SourceInitialized(object? sender, EventArgs e) => UpdateTitleBarTheme();
+
+        private void UpdateTitleBarTheme()
         {
             try
             {
                 IntPtr hwnd = new System.Windows.Interop.WindowInteropHelper(this).Handle;
-                int enabled = 1;
+                if (hwnd == IntPtr.Zero) return;
+                int enabled = _appearanceTheme == UI.AppTheme.Midnight ? 1 : 0;
                 int size = Marshal.SizeOf(enabled);
 
                 int result = DwmSetWindowAttribute(
@@ -193,7 +231,7 @@ namespace SerpiumVPN
             }
             catch
             {
-                // Dark title-bar support depends on the Windows build.
+                // Native title-bar theme support depends on the Windows build.
             }
         }
 
@@ -206,6 +244,7 @@ namespace SerpiumVPN
             bool recoveredPreviousSession = await RecoverRelayLifecycleAtStartupAsync();
             await RefreshSecureProfileVaultStatusAsync();
             await RefreshRoutingRegistryAsync();
+            await LoadSimpleHomeAsync();
             _relayLifecycleTimer.Start();
 
             if (recoveredPreviousSession)
@@ -215,341 +254,16 @@ namespace SerpiumVPN
                     WpfBrushes.Goldenrod);
             }
 
-            if (_settings.AutoUpdateFiles)
-                await CheckVendorUpdatesAsync(showSuccessMessage: false);
+            if (_settings.AutoUpdateTelegramProxy)
+                await CheckTelegramProxyUpdatesAsync(showSuccessMessage: false);
 
             if (_settings.AutoUpdateProgram)
                 await CheckAppUpdatesAsync(showSuccessMessage: false);
 
             if (_settings.AutoCheckRelayComponents)
                 _ = CheckRelayComponentsInBackgroundAsync();
-
-            await RestoreSavedStrategyAsync();
         }
 
-        // Читает пользовательский список доменов и выводит его в текстовое поле
-        private void LoadHostsList()
-        {
-            try
-            {
-                try
-                {
-                    _zapretManager.EnsureRequiredUserLists();
-                }
-                catch (Exception ex)
-                {
-                    HostsTextBox.Text =
-                        "# Не удалось создать list-general-user.txt автоматически." + Environment.NewLine +
-                        "# Причина: " + ex.Message + Environment.NewLine +
-                        "# Запустите программу от имени администратора или переустановите через новый Inno-установщик.";
-                    return;
-                }
-
-                if (File.Exists(_listFilePath))
-                {
-                    // Читаем файл (с поддержкой UTF-8 без BOM или дефолтной)
-                    string hostsContent = File.ReadAllText(_listFilePath, Encoding.UTF8);
-                    HostsTextBox.Text = hostsContent;
-                    System.Diagnostics.Debug.WriteLine("[UI] Пользовательский список успешно выведен в окно.");
-                }
-                else
-                {
-                    HostsTextBox.Text = "# Файл list-general-user не найден. Нажмите сохранить, чтобы создать его.";
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Ошибка загрузки списка: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        /// <summary>
-        /// Обработчик кнопки «Сохранить список» со строгой валидацией и отменой записи
-        /// </summary>
-        private void SaveList_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                // Разбираем текст из TextBox на отдельные строки
-                string[] lines = HostsTextBox.Text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
-
-                var validatedLines = new System.Collections.Generic.List<string>();
-                var errorMessages = new System.Collections.Generic.List<string>();
-                int correctedCount = 0;
-
-                for (int i = 0; i < lines.Length; i++)
-                {
-                    string rawLine = lines[i];
-                    string line = rawLine.Trim();
-                    int lineNumber = i + 1; // Номер строки для пользователя
-
-                    // Пропускаем пустые строки или сохраняем комментарии как есть
-                    if (string.IsNullOrEmpty(line) || line.StartsWith("#"))
-                    {
-                        validatedLines.Add(rawLine);
-                        continue;
-                    }
-
-                    if (TryNormalizeDomainLine(line, out string normalizedLine, out bool wasCorrected))
-                    {
-                        validatedLines.Add(normalizedLine);
-
-                        if (wasCorrected)
-                            correctedCount++;
-                    }
-                    else
-                    {
-                        // Если даже после попытки исправления это не домен — фиксируем ошибку
-                        errorMessages.Add($"Строка {lineNumber}: \"{line}\"");
-                    }
-                }
-
-                // КРИТИЧЕСКИЙ ТОЧКА: Если есть ошибки, прерываем запись!
-                if (errorMessages.Count > 0)
-                {
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine("Сохранение отменено! Обнаружены некорректные домены:\n");
-
-                    // Выводим первые 10 ошибок, чтобы не раздувать окно, если их слишком много
-                    for (int k = 0; k < Math.Min(errorMessages.Count, 10); k++)
-                    {
-                        sb.AppendLine(errorMessages[k]);
-                    }
-
-                    if (errorMessages.Count > 10)
-                    {
-                        sb.AppendLine($"...и еще {errorMessages.Count - 10} строк(и).");
-                    }
-
-                    sb.AppendLine("\nПожалуйста, исправьте их. Формат: google.com, discord.gg или ссылка вида https://example.com/path");
-
-                    MessageBox.Show(sb.ToString(), "Ошибка формата", MessageBoxButton.OK, MessageBoxImage.Error);
-                    return; // Выходим из метода, ничего не записывая в файл!
-                }
-
-                Directory.CreateDirectory(IOPath.GetDirectoryName(_listFilePath)!);
-
-                // Если ошибок нет — со спокойной душой пишем в файл
-                File.WriteAllLines(_listFilePath, validatedLines, Encoding.UTF8);
-
-                // Показываем отчёт об успешном сохранении
-                if (correctedCount > 0)
-                {
-                    MessageBox.Show($"Список успешно проверен и сохранен!\n\nАвтоматически исправлено (ссылки/www): {correctedCount}",
-                                    "Успех", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-                else
-                {
-                    MessageBox.Show("Список доменов успешно проверен и сохранен!", "Успех", MessageBoxButton.OK, MessageBoxImage.Information);
-                }
-
-                // Обновляем TextBox, чтобы юзер увидел очищенный от 'https://' и 'www.' красивый список
-                HostsTextBox.Text = string.Join(Environment.NewLine, validatedLines);
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Не удалось сохранить файл: {ex.Message}", "Ошибка", MessageBoxButton.OK, MessageBoxImage.Error);
-            }
-        }
-
-        private static bool TryNormalizeDomainLine(string input, out string normalizedDomain, out bool wasCorrected)
-        {
-            normalizedDomain = string.Empty;
-            wasCorrected = false;
-
-            string original = input.Trim();
-            string candidate = original;
-
-            if (candidate.Contains("://", StringComparison.OrdinalIgnoreCase) &&
-                !candidate.StartsWith("http://", StringComparison.OrdinalIgnoreCase) &&
-                !candidate.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
-            {
-                return false;
-            }
-
-            if (TryExtractHost(candidate, out string extractedHost))
-                candidate = extractedHost;
-
-            candidate = candidate.Trim().TrimEnd('.');
-
-            if (candidate.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
-                candidate = candidate.Substring(4);
-
-            try
-            {
-                candidate = new IdnMapping().GetAscii(candidate);
-            }
-            catch
-            {
-                return false;
-            }
-
-            candidate = candidate.ToLowerInvariant();
-
-            if (!IsValidDomain(candidate))
-                return false;
-
-            normalizedDomain = candidate;
-            wasCorrected = !string.Equals(original, normalizedDomain, StringComparison.Ordinal);
-            return true;
-        }
-
-        private static bool TryExtractHost(string value, out string host)
-        {
-            host = string.Empty;
-
-            if (Uri.TryCreate(value, UriKind.Absolute, out Uri? absoluteUri) &&
-                (absoluteUri.Scheme == Uri.UriSchemeHttp || absoluteUri.Scheme == Uri.UriSchemeHttps) &&
-                !string.IsNullOrWhiteSpace(absoluteUri.Host))
-            {
-                host = absoluteUri.Host;
-                return true;
-            }
-
-            if (value.Contains('/') || value.Contains('?') || value.Contains('#') || value.Contains(':'))
-            {
-                if (Uri.TryCreate("https://" + value, UriKind.Absolute, out Uri? inferredUri) &&
-                    !string.IsNullOrWhiteSpace(inferredUri.Host))
-                {
-                    host = inferredUri.Host;
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
-        private static bool IsValidDomain(string domain)
-        {
-            if (domain.Length == 0 || domain.Length > 253 || !domain.Contains('.'))
-                return false;
-
-            string[] labels = domain.Split('.');
-            bool hasLetter = false;
-
-            foreach (string label in labels)
-            {
-                if (label.Length == 0 || label.Length > 63)
-                    return false;
-
-                if (label.StartsWith("-") || label.EndsWith("-"))
-                    return false;
-
-                foreach (char c in label)
-                {
-                    bool isLetter = c is >= 'a' and <= 'z';
-                    bool isDigit = c is >= '0' and <= '9';
-
-                    if (!isLetter && !isDigit && c != '-')
-                        return false;
-
-                    hasLetter |= isLetter;
-                }
-            }
-
-            return hasLetter && !IsAllDigits(labels[^1]);
-        }
-
-        private static bool IsAllDigits(string value)
-        {
-            foreach (char c in value)
-            {
-                if (c is < '0' or > '9')
-                    return false;
-            }
-
-            return true;
-        }
-
-        // Кнопка: Способ 1
-        private void Strategy1_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                HideStrategySelectionProgress();
-                _zapretManager.StartStrategy(1);
-                SaveCurrentStrategySettings();
-                StartStrategyMonitor();
-                UpdateZapretStatus(true, "Zapret: работает (Способ 1)");
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(ex.Message, "Ошибка запуска");
-            }
-        }
-
-        // Кнопка: Способ 2
-        private async void Strategy2_ClickAsync(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                CancelStrategySelection();
-                ButtonStrategy2.IsEnabled = false;
-
-                // 1. Считываем состояние чекбоксов из UI
-                bool needYoutube = CheckYouTube.IsChecked ?? false;
-                bool needDiscord = CheckDiscord.IsChecked ?? false;
-                SaveServiceSelectionSettings();
-
-                _strategySelectionCts = new CancellationTokenSource();
-
-                System.Diagnostics.Debug.WriteLine($"[UI] Запуск автоподбора. YouTube: {needYoutube}, Discord: {needDiscord}");
-
-                ShowStrategySelectionProgress("Подбор стратегии...", "Готовимся к проверке стратегий", 0);
-                UpdateAutoSelectStatus("Подбираем стратегию...", 0);
-
-                Progress<StrategySelectionProgress> selectionProgress = new Progress<StrategySelectionProgress>(progress =>
-                {
-                    ShowStrategySelectionProgress("Подбор стратегии...", progress.Message, progress.Percent);
-                    UpdateAutoSelectStatus(progress.Message, progress.Percent);
-                });
-
-                // 2. Передаем флаги в ZapretManager
-                bool isStrategyFound = await _zapretManager.AutoSelectStrategyAsync(
-                    needYoutube,
-                    needDiscord,
-                    preferFirstAcceptable: !_settings.AutoSwitchStrategies,
-                    progress: selectionProgress,
-                    cancellationToken: _strategySelectionCts.Token
-                );
-
-                if (isStrategyFound)
-                {
-                    SaveCurrentStrategySettings();
-                    StartStrategyMonitor();
-                    ShowStrategySelectionProgress("Стратегия найдена", $"Запущено: {_zapretManager.CurrentStrategyName}", 100);
-                    UpdateZapretStatus(true,  $"Zapret: работает ({_zapretManager.CurrentStrategyName})");
-                }
-                else
-                {
-                    UpdateAutoSelectStatus("Ошибка автоподбора", 0);
-                    MessageBox.Show(
-                        "Подходящая стратегия не найдена.\n\n" +
-                        _zapretManager.LastAutoSelectReport + "\n\n" +
-                        "Полный лог: " + _zapretManager.LastAutoSelectLogPath,
-                        "Диагностика автоподбора",
-                        MessageBoxButton.OK,
-                        MessageBoxImage.Warning
-                    );
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                _zapretManager.Stop();
-                ShowStrategySelectionProgress("Подбор отменён", "Пользователь остановил подбор стратегии", 0);
-                UpdateZapretStatus(false, "Zapret: отключен");
-            }
-            catch (Exception ex)
-            {
-                System.Windows.MessageBox.Show($"Ошибка интерфейса: {ex.Message}", "Ошибка", System.Windows.MessageBoxButton.OK, System.Windows.MessageBoxImage.Error);
-            }
-            finally
-            {
-                _strategySelectionCts?.Dispose();
-                _strategySelectionCts = null;
-                ButtonStrategy2.IsEnabled = true;
-            }
-        }
 
         // Кнопка: Telegram WS-прогон
         private async void Telegram_ClickAsync(object sender, RoutedEventArgs e)
@@ -557,7 +271,6 @@ namespace SerpiumVPN
             try
             {
                 ButtonTelegram.IsEnabled = false;
-                HideStrategySelectionProgress();
                 UpdateTelegramStatus("Запускаем Telegram WS-прокси...", false);
 
                 TelegramProxyStartResult result = await _telegramProxyManager.StartAsync();
@@ -595,99 +308,38 @@ namespace SerpiumVPN
             }
         }
 
-        private async Task CheckVendorUpdatesAsync(bool showSuccessMessage)
+        private async Task CheckTelegramProxyUpdatesAsync(bool showSuccessMessage)
         {
             try
             {
-                UpdateFilesStatus("Проверяем обновления файлов...", false);
-
-                _zapretManager.Stop();
+                UpdateFilesStatus("Проверяем обновление Telegram-прокси...", false);
                 _telegramProxyManager.Stop();
-
-                Progress<string> progress = new Progress<string>(message =>
-                {
-                    UpdateFilesStatus(message, false);
-                });
-
+                Progress<string> progress = new(message => UpdateFilesStatus(message, false));
                 VendorUpdateSummary summary = await _vendorUpdateManager.CheckAndUpdateAsync(progress);
-
-                if (summary.HasUpdates)
+                bool skipped = summary.SkippedFiles.Count > 0;
+                UpdateFilesStatus(skipped ? "Файл занят. Повторите обновление после остановки прокси."
+                    : summary.HasUpdates ? "Telegram-прокси обновлён" : "Telegram-прокси актуален", !skipped);
+                if (showSuccessMessage)
                 {
-                    string details = string.Join(
-                        Environment.NewLine,
-                        summary.Items.Where(item => item.Updated).Select(item => $"{item.Name}: {item.LatestVersion}")
-                    );
-                    string skippedDetails = summary.SkippedFiles.Count > 0
-                        ? Environment.NewLine + Environment.NewLine +
-                          "Эти файлы сейчас заняты Windows и были пропущены:" + Environment.NewLine +
-                          string.Join(Environment.NewLine, summary.SkippedFiles.Distinct(StringComparer.OrdinalIgnoreCase)) +
-                          Environment.NewLine + Environment.NewLine +
-                          "Чтобы заменить их тоже, перезагрузите ПК и нажмите проверку обновлений ещё раз до запуска обхода."
-                        : string.Empty;
-
-                    UpdateFilesStatus("Файлы обновлены", true);
-
-                    string noticeBody =
-                        details + skippedDetails;
-
-                    SerpiumNoticeDialog.Show(
-                        this,
-                        "Обновления Zapret",
-                        summary.SkippedFiles.Count > 0
-                            ? "Компоненты обновлены частично"
-                            : "Компоненты Zapret обновлены",
-                        summary.SkippedFiles.Count > 0
-                            ? "Основные файлы обновлены, но часть занятых Windows файлов была пропущена."
-                            : "Локальные компоненты успешно скачаны, проверены и заменены.",
-                        noticeBody,
-                        summary.SkippedFiles.Count > 0
-                            ? "После перезагрузки ПК повторите проверку до запуска обхода."
-                            : "Компоненты Zapret готовы к работе.",
-                        summary.SkippedFiles.Count > 0
-                            ? SerpiumNoticeKind.Warning
-                            : SerpiumNoticeKind.Success);
-
-                    LoadHostsList();
-                }
-                else
-                {
-                    UpdateFilesStatus("Файлы актуальны", true);
-
-                    if (showSuccessMessage)
-                    {
-                        SerpiumNoticeDialog.Show(
-                            this,
-                            "Обновления Zapret",
-                            "Компоненты уже актуальны",
-                            "Новых стабильных файлов для Zapret не обнаружено.",
-                            "Все установленные компоненты соответствуют последним доступным версиям.",
-                            "Дополнительных действий не требуется.",
-                            SerpiumNoticeKind.Information);
-                    }
+                    string details = string.Join(Environment.NewLine,
+                        summary.Items.Select(item => $"{item.Name}: {item.LatestVersion}"));
+                    SerpiumNoticeDialog.Show(this, "Обновление Telegram-прокси",
+                        skipped ? "Не удалось заменить файл" : summary.HasUpdates ? "Telegram-прокси обновлён" : "Обновлений нет",
+                        skipped ? "Прокси используется другим процессом." : "Проверка компонентов завершена.",
+                        details,
+                        skipped ? "Остановите Telegram-прокси и повторите обновление." : "Дополнительных действий не требуется.",
+                        skipped ? SerpiumNoticeKind.Warning : SerpiumNoticeKind.Information);
                 }
             }
             catch (Exception ex)
             {
-                UpdateFilesStatus("Ошибка обновления файлов", false);
-
+                UpdateFilesStatus("Ошибка обновления Telegram-прокси", false);
                 if (showSuccessMessage)
-                {
-                    SerpiumNoticeDialog.Show(
-                        this,
-                        "Обновления Zapret",
-                        "Не удалось обновить компоненты",
-                        "Проверка или установка файлов завершилась ошибкой.",
-                        ex.Message,
-                        "Рабочие файлы, которые не удалось заменить, остаются без изменений.",
-                        SerpiumNoticeKind.Warning);
-                }
+                    SerpiumNoticeDialog.Show(this, "Обновление Telegram-прокси", "Не удалось обновить компонент",
+                        "Проверка или установка файлов завершилась ошибкой.", ex.Message,
+                        "Попробуйте проверить обновление позднее.", SerpiumNoticeKind.Warning);
                 else
-                {
-                    System.Diagnostics.Debug.WriteLine($"[UPDATE WARN] {ex}");
-                }
-            }
-            finally
-            {
+                    Debug.WriteLine($"[UPDATE WARN] {ex}");
             }
         }
 
@@ -732,7 +384,6 @@ namespace SerpiumVPN
 
                         if (restart == MessageBoxResult.Yes)
                         {
-                            _zapretManager.Stop();
                             _telegramProxyManager.Stop();
                             _appUpdateManager.RestartAndApply();
                         }
@@ -754,10 +405,6 @@ namespace SerpiumVPN
             }
         }
 
-        private void OpenZapretPage_Click(object sender, RoutedEventArgs e)
-        {
-            MainNavigationTabs.SelectedIndex = 1;
-        }
 
         private void OpenRelayPage_Click(object sender, RoutedEventArgs e)
         {
@@ -790,48 +437,7 @@ namespace SerpiumVPN
             window.Show();
         }
 
-        private async Task CheckRelayComponentsInBackgroundAsync()
-        {
-            try
-            {
-                if (_settings.LastRelayComponentCheckUtc is DateTimeOffset lastCheck &&
-                    DateTimeOffset.UtcNow - lastCheck < TimeSpan.FromHours(12))
-                {
-                    return;
-                }
-
-                IReadOnlyDictionary<RelayComponentKind, RelayComponentReleaseInfo> releases =
-                    await _relayComponentManager.CheckLatestStableReleasesAsync();
-                IReadOnlyDictionary<RelayComponentKind, RelayComponentSnapshot> snapshots =
-                    await _relayComponentManager.InspectAllAsync();
-
-                _settings.LastRelayComponentCheckUtc = DateTimeOffset.UtcNow;
-                _settings.LastKnownSingBoxRelease =
-                    releases[RelayComponentKind.SingBox].TagName;
-                _settings.LastKnownXrayRelease =
-                    releases[RelayComponentKind.XrayCore].TagName;
-                _settings.Save();
-
-                int updateCount = snapshots.Values.Count(snapshot =>
-                    releases.TryGetValue(snapshot.Kind, out RelayComponentReleaseInfo? release) &&
-                    RelayComponentManager.IsUpdateAvailable(
-                        snapshot.InstalledVersion,
-                        release.NormalizedVersion));
-
-                string tooltip = updateCount > 0
-                    ? $"Компоненты Relay: официальных релизов новее — {updateCount}."
-                    : "Компоненты Relay: новых стабильных релизов не обнаружено.";
-
-                SafeDispatcherInvoke(() =>
-                    RelayComponentSettingsButton.ToolTip = tooltip);
-            }
-            catch
-            {
-                SafeDispatcherInvoke(() =>
-                    RelayComponentSettingsButton.ToolTip =
-                        "Компоненты Relay: автоматическая проверка временно недоступна.");
-            }
-        }
+        private Task CheckRelayComponentsInBackgroundAsync() => CheckSimpleComponentUpdatesAsync(false);
 
         private void Settings_Click(object sender, RoutedEventArgs e)
         {
@@ -935,16 +541,12 @@ namespace SerpiumVPN
         }
 
         // Кнопка: Остановить
-        private void Stop_Click(object sender, RoutedEventArgs e)
+        private void StopTelegram_Click(object sender, RoutedEventArgs e)
         {
             try
             {
-                CancelStrategySelection();
-                StopStrategyMonitor();
-                _zapretManager.Stop();
                 _telegramProxyManager.Stop();
-                HideStrategySelectionProgress();
-                UpdateZapretStatus(false, "Zapret: отключен");
+                UpdateTelegramStatus("Telegram-прокси остановлен", false);
             }
             catch (Exception ex)
             {
@@ -952,55 +554,11 @@ namespace SerpiumVPN
             }
         }
 
-        private void ShowStrategySelectionProgress(string title, string details, int percent)
-        {
-            AutoSelectPanel.Visibility = Visibility.Visible;
-            AutoSelectTitle.Text = title;
-            AutoSelectDetails.Text = details;
-            SetAutoSelectProgress(percent);
-        }
-
-        private void HideStrategySelectionProgress()
-        {
-            AutoSelectPanel.Visibility = Visibility.Visible;
-            AutoSelectTitle.Text = string.Empty;
-            AutoSelectTitle.Visibility = Visibility.Collapsed;
-            SetAutoSelectProgress(0);
-            AutoSelectDetails.Text = "Готов к поиску рабочей стратегии";
-        }
-
-        private void SetAutoSelectProgress(int percent)
-        {
-            int safePercent = Math.Clamp(percent, 0, 100);
-
-            void ApplyWidth()
-            {
-                double trackWidth = AutoSelectProgressTrack.ActualWidth;
-                AutoSelectProgressFill.Width = trackWidth <= 0
-                    ? 0
-                    : trackWidth * safePercent / 100.0;
-            }
-
-            ApplyWidth();
-
-            if (AutoSelectProgressTrack.ActualWidth <= 0)
-            {
-                Dispatcher.BeginInvoke((Action)ApplyWidth, DispatcherPriority.Loaded);
-            }
-        }
-
-        private void UpdateAutoSelectStatus(string details, int percent)
-        {
-            AutoSelectPanel.Visibility = Visibility.Visible;
-            AutoSelectTitle.Visibility = Visibility.Collapsed;
-            AutoSelectDetails.Text = details;
-            SetAutoSelectProgress(percent);
-        }
 
         private void UpdateFilesStatus(string text, bool success)
         {
-            ZapretFilesStatusText.Text = text;
-            ZapretFilesStatusText.Foreground = new SolidColorBrush(
+            TelegramFilesStatusText.Text = text;
+            TelegramFilesStatusText.Foreground = new SolidColorBrush(
                 (Color)ColorConverter.ConvertFromString(success ? "#68D391" : "#D0D0DA"));
         }
 
@@ -1018,17 +576,6 @@ namespace SerpiumVPN
                 (Color)ColorConverter.ConvertFromString(success ? "#68D391" : "#D0D0DA"));
         }
 
-        // Верхний индикатор отражает только состояние Zapret.
-        private void UpdateZapretStatus(bool isRunning, string text)
-        {
-            StatusText.Text = text;
-
-            string colorHex = isRunning ? "#00FF66" : "#FF4F4F";
-            var targetColor = (Color)ColorConverter.ConvertFromString(colorHex);
-
-            StatusDot.Fill = new SolidColorBrush(targetColor);
-            DotGlow.Color = targetColor;
-        }
 
         private void MainWindow_Closing(object? sender, System.ComponentModel.CancelEventArgs e)
         {
@@ -1044,13 +591,26 @@ namespace SerpiumVPN
                 );
                 return;
             }
-
-            StopStrategyMonitor();
+            _simpleDiscoveryTimer.Stop();
+            _componentUpdateTimer.Stop();
+            _simpleLifetime.Cancel();
+            _simpleDiscovery.Dispose();
+            SimpleHome.ClearKey();
             _relayLifecycleTimer.Stop();
-            _zapretManager.Stop();
             _telegramProxyManager.Stop();
             ClearPendingRelaySourceKey();
             DisposeValidatedProviderRuntimeProfile();
+            try
+            {
+                if (_wfpRoutingController.IsBridgeRunning)
+                {
+                    _wfpRoutingController.StopBridgeAsync().GetAwaiter().GetResult();
+                }
+            }
+            catch
+            {
+                // WFP lease is fail-open and expires if shutdown cleanup cannot complete.
+            }
             try
             {
                 if (_serpiumSingBoxSessionManager.HasLiveProcess ||
@@ -1084,6 +644,7 @@ namespace SerpiumVPN
             {
                 // Best effort during final application shutdown.
             }
+            try { _wfpRoutingController.Dispose(); } catch { }
             try { _serpiumSingBoxSessionManager.Dispose(); } catch { }
             try { _serpiumXraySessionManager.Dispose(); } catch { }
             try { _xrayClientManager.Dispose(); } catch { }
@@ -1109,13 +670,8 @@ namespace SerpiumVPN
 
             Forms.ContextMenuStrip menu = new Forms.ContextMenuStrip();
             menu.Items.Add("Открыть", null, (_, _) => Dispatcher.Invoke(ShowFromTray));
-            menu.Items.Add("Остановить обход", null, (_, _) => Dispatcher.Invoke(() =>
-            {
-                StopStrategyMonitor();
-                _zapretManager.Stop();
-                _telegramProxyManager.Stop();
-                UpdateZapretStatus(false, "Zapret: отключен");
-            }));
+            menu.Items.Add("Остановить Telegram-прокси", null, (_, _) => Dispatcher.Invoke(() =>
+                StopTelegram_Click(this, new RoutedEventArgs())));
             menu.Items.Add("Выход", null, (_, _) => Dispatcher.Invoke(ExitApplication));
 
             _trayIcon.ContextMenuStrip = menu;
@@ -1159,30 +715,13 @@ namespace SerpiumVPN
             System.Windows.Application.Current.Shutdown();
         }
 
-        private void CancelStrategySelection()
-        {
-            if (_strategySelectionCts == null)
-                return;
-
-            try
-            {
-                _strategySelectionCts.Cancel();
-            }
-            catch
-            {
-                // ignore cancellation races
-            }
-        }
 
         private void LoadRuntimeSettingsIntoUi()
         {
             _isLoadingRuntimeSettings = true;
             try
             {
-                CheckYouTube.IsChecked = _settings.CheckYouTube;
-                CheckDiscord.IsChecked = _settings.CheckDiscord;
-                CheckAutoSwitchStrategies.IsChecked = _settings.AutoSwitchStrategies;
-                CheckAutoUpdateFiles.IsChecked = _settings.AutoUpdateFiles;
+                CheckAutoUpdateTelegramProxy.IsChecked = _settings.AutoUpdateTelegramProxy;
                 CheckAutoUpdateProgram.IsChecked = _settings.AutoUpdateProgram;
                 AppVersionTextBlock.Text = AppVersionInfo.Display;
             }
@@ -1192,162 +731,29 @@ namespace SerpiumVPN
             }
         }
 
-        private void ZapretSettingsToggle_Changed(object sender, RoutedEventArgs e)
+        private void TelegramProxySettingsToggle_Changed(object sender, RoutedEventArgs e)
         {
             if (_isLoadingRuntimeSettings)
                 return;
-
-            _settings.AutoSwitchStrategies =
-                CheckAutoSwitchStrategies.IsChecked == true;
-            _settings.AutoUpdateFiles =
-                CheckAutoUpdateFiles.IsChecked == true;
+            _settings.AutoUpdateTelegramProxy = CheckAutoUpdateTelegramProxy.IsChecked == true;
             _settings.Save();
-
-            if (_settings.AutoSwitchStrategies && _zapretManager.IsRunning)
-                StartStrategyMonitor();
-            else
-                StopStrategyMonitor();
         }
 
-        private async void UpdateZapretFiles_ClickAsync(
+        private async void UpdateTelegramProxyFiles_ClickAsync(
             object sender,
             RoutedEventArgs e)
         {
             try
             {
-                ButtonUpdateZapretFiles.IsEnabled = false;
-                await CheckVendorUpdatesAsync(showSuccessMessage: true);
+                ButtonUpdateTelegramProxyFiles.IsEnabled = false;
+                await CheckTelegramProxyUpdatesAsync(showSuccessMessage: true);
             }
             finally
             {
-                ButtonUpdateZapretFiles.IsEnabled = true;
+                ButtonUpdateTelegramProxyFiles.IsEnabled = true;
             }
         }
 
-        private async Task RestoreSavedStrategyAsync()
-        {
-            if (!_settings.AutoStartLastStrategy || string.IsNullOrWhiteSpace(_settings.LastStrategyName))
-                return;
-
-            try
-            {
-                UpdateZapretStatus(true, $"Zapret: запускаем сохранённую стратегию ({_settings.LastStrategyName})...");
-                _zapretManager.StartStrategy(_settings.LastStrategyName);
-                await Task.Delay(2500);
-
-                bool ok = await _zapretManager.CheckConnectionAsync(_settings.CheckYouTube, _settings.CheckDiscord);
-                if (ok)
-                {
-                    StartStrategyMonitor();
-                    UpdateZapretStatus(true,  $"Zapret: работает ({_settings.LastStrategyName})");
-                    return;
-                }
-
-                UpdateZapretStatus(true, "Zapret: сохранённая стратегия просела, подбираем новую...");
-                bool selected = await _zapretManager.AutoSelectStrategyAsync(_settings.CheckYouTube, _settings.CheckDiscord, showMessages: false);
-                if (selected)
-                {
-                    SaveCurrentStrategySettings();
-                    StartStrategyMonitor();
-                    UpdateZapretStatus(true,  $"Zapret: работает ({_zapretManager.CurrentStrategyName})");
-                }
-                else
-                {
-                    UpdateZapretStatus(false, "Zapret: нет подходящей стратегии");
-                }
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[RESTORE WARN] {ex}");
-                UpdateZapretStatus(false, "Zapret: сохранённая стратегия не запущена");
-            }
-        }
-
-        private void SaveCurrentStrategySettings()
-        {
-            SaveServiceSelectionSettings();
-            _settings.LastStrategyName = _zapretManager.CurrentStrategyName;
-            _settings.LastStrategySavedAt = DateTime.Now;
-            _settings.Save();
-        }
-
-        private void SaveServiceSelectionSettings()
-        {
-            _settings.CheckYouTube = CheckYouTube.IsChecked ?? false;
-            _settings.CheckDiscord = CheckDiscord.IsChecked ?? false;
-            _settings.Save();
-        }
-
-        private void StartStrategyMonitor()
-        {
-            if (_settings.AutoSwitchStrategies)
-                _strategyMonitorTimer.Start();
-            else
-                _strategyMonitorTimer.Stop();
-        }
-
-        private void StopStrategyMonitor()
-        {
-            _strategyMonitorTimer.Stop();
-        }
-
-        private async void StrategyMonitorTimer_TickAsync(object? sender, EventArgs e)
-        {
-            if (_isMonitoringStrategy || !_settings.AutoSwitchStrategies || !_zapretManager.IsRunning)
-                return;
-
-            _isMonitoringStrategy = true;
-
-            try
-            {
-                bool needYoutube = CheckYouTube.IsChecked ?? false;
-                bool needDiscord = CheckDiscord.IsChecked ?? false;
-
-                CancelStrategySelection();
-                _strategySelectionCts = new CancellationTokenSource();
-
-                bool currentOk = await _zapretManager.CheckConnectionAsync(
-                    needYoutube,
-                    needDiscord,
-                    cancellationToken: _strategySelectionCts.Token
-                );
-
-                if (currentOk)
-                {
-                    UpdateZapretStatus(true,  $"Zapret: работает ({_zapretManager.CurrentStrategyName})");
-                    return;
-                }
-
-                UpdateZapretStatus(true, "Zapret: качество просело, меняем стратегию...");
-
-                bool switched = await _zapretManager.AutoSelectStrategyAsync(
-                    needYoutube,
-                    needDiscord,
-                    showMessages: false,
-                    cancellationToken: _strategySelectionCts.Token
-                );
-                if (switched)
-                {
-                    SaveCurrentStrategySettings();
-                    UpdateZapretStatus(true,  $"Zapret: автосмена: {_zapretManager.CurrentStrategyName}");
-                }
-                else
-                {
-                    UpdateZapretStatus(false, "Zapret: нет стратегии с подходящей скоростью");
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                _zapretManager.Stop();
-                UpdateZapretStatus(false, "Zapret: отключен");
-            }
-            finally
-            {
-                _strategySelectionCts?.Dispose();
-                _strategySelectionCts = null;
-                _isMonitoringStrategy = false;
-            }
-        }
 
       
         private async void StartRelayGateway_ClickAsync(object sender, RoutedEventArgs e)
@@ -1620,6 +1026,18 @@ namespace SerpiumVPN
             {
                 SetRelayStatus("Статус: отключение…", WpfBrushes.Goldenrod);
 
+                if (_wfpRoutingController.IsBridgeRunning)
+                {
+                    try
+                    {
+                        await _wfpRoutingController.StopBridgeAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        stopError ??= ex;
+                    }
+                }
+
                 bool stopSingBox =
                     _serpiumSingBoxSessionManager.HasLiveProcess ||
                     _serpiumSingBoxSessionManager.State is RelayGatewayState.Starting or
@@ -1685,6 +1103,7 @@ namespace SerpiumVPN
 
         private void UpdateRelayClientUi()
         {
+            UpdateSimpleConnectionState();
             RelayGatewayState xrayState = _serpiumXraySessionManager.State;
             RelayGatewayState singBoxState = _serpiumSingBoxSessionManager.State;
 
@@ -1708,6 +1127,10 @@ namespace SerpiumVPN
                 (_validatedProviderRuntimeProfile is not null ||
                  singBoxState != RelayGatewayState.Stopped ||
                  singBoxRunning);
+            bool singBoxWfpBackendMode =
+                providerMode &&
+                _activeSavedProfileUsesWfpRouting &&
+                _serpiumSingBoxSessionManager.IsProxyBackendMode;
 
             ButtonStartRelayClient.IsEnabled = !isBusy && !isRunning;
             ButtonStopRelayClient.IsEnabled = isBusy || isRunning ||
@@ -1748,14 +1171,23 @@ namespace SerpiumVPN
                     _ => "Xray + TUN: остановлены"
                 }
                 : providerMode
-                    ? visibleState switch
-                    {
-                        RelayGatewayState.Starting => "sing-box: запускается…",
-                        RelayGatewayState.Running => "sing-box: работает",
-                        RelayGatewayState.Stopping => "sing-box: останавливается…",
-                        RelayGatewayState.Failed => "sing-box: ошибка",
-                        _ => "sing-box: остановлен"
-                    }
+                    ? singBoxWfpBackendMode
+                        ? visibleState switch
+                        {
+                            RelayGatewayState.Starting => "sing-box WFP backend: запускается…",
+                            RelayGatewayState.Running => "sing-box WFP backend: работает",
+                            RelayGatewayState.Stopping => "sing-box WFP backend: останавливается…",
+                            RelayGatewayState.Failed => "sing-box WFP backend: ошибка",
+                            _ => "sing-box WFP backend: остановлен"
+                        }
+                        : visibleState switch
+                        {
+                            RelayGatewayState.Starting => "sing-box: запускается…",
+                            RelayGatewayState.Running => "sing-box: работает",
+                            RelayGatewayState.Stopping => "sing-box: останавливается…",
+                            RelayGatewayState.Failed => "sing-box: ошибка",
+                            _ => "sing-box: остановлен"
+                        }
                     : visibleState switch
                     {
                         RelayGatewayState.Starting => "Xray: запускается…",
@@ -1776,14 +1208,23 @@ namespace SerpiumVPN
 
             if (providerMode)
             {
-                RelayClientSocksStateTextBlock.Text = visibleState switch
-                {
-                    RelayGatewayState.Starting => "TUN: запускается…",
-                    RelayGatewayState.Running =>
-                        $"TUN: активен ({_serpiumSingBoxSessionManager.InterfaceName ?? "Serpium"})",
-                    RelayGatewayState.Stopping => "TUN: освобождает маршруты…",
-                    _ => "TUN: остановлен"
-                };
+                RelayClientSocksStateTextBlock.Text = singBoxWfpBackendMode
+                    ? visibleState switch
+                    {
+                        RelayGatewayState.Starting => "WFP backend SOCKS5: запускается…",
+                        RelayGatewayState.Running =>
+                            $"WFP → SOCKS5 активен (127.0.0.1:{_serpiumSingBoxSessionManager.SocksPort})",
+                        RelayGatewayState.Stopping => "WFP backend SOCKS5: останавливается…",
+                        _ => "WFP backend SOCKS5: остановлен"
+                    }
+                    : visibleState switch
+                    {
+                        RelayGatewayState.Starting => "TUN: запускается…",
+                        RelayGatewayState.Running =>
+                            $"TUN: активен ({_serpiumSingBoxSessionManager.InterfaceName ?? "Serpium"})",
+                        RelayGatewayState.Stopping => "TUN: освобождает маршруты…",
+                        _ => "TUN: остановлен"
+                    };
             }
             else if (!xrayRunning)
             {
@@ -1803,8 +1244,11 @@ namespace SerpiumVPN
                 !string.IsNullOrWhiteSpace(_serpiumSingBoxSessionManager.LastError))
             {
                 SetRelayStatus(
-                    "Статус: TUN-соединение завершилось с ошибкой — " +
-                    _serpiumSingBoxSessionManager.LastError,
+                    singBoxWfpBackendMode
+                        ? "Статус: sing-box WFP backend завершился с ошибкой — " +
+                          _serpiumSingBoxSessionManager.LastError
+                        : "Статус: TUN-соединение завершилось с ошибкой — " +
+                          _serpiumSingBoxSessionManager.LastError,
                     WpfBrushes.OrangeRed);
             }
             else if (xrayState == RelayGatewayState.Failed &&
@@ -2123,9 +1567,12 @@ namespace SerpiumVPN
             }
         }
 
-        private async void SavedProfileToggle_CheckedAsync(
-            object sender,
-            RoutedEventArgs e)
+        private async void SavedProfileToggle_CheckedAsync(object sender, RoutedEventArgs e)
+        {
+            await ConnectSavedProfileAsync(sender);
+        }
+
+        private async Task ConnectSavedProfileAsync(object sender, bool propagateFailure = false, CancellationToken cancellationToken = default)
         {
             if (sender is not System.Windows.Controls.Primitives.ToggleButton toggle ||
                 toggle.Tag is not Guid profileId ||
@@ -2135,6 +1582,7 @@ namespace SerpiumVPN
                 return;
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             _savedProfileInputBlockedUntil = DateTimeOffset.UtcNow.AddMilliseconds(900);
 
             bool anySavedEngineRunning =
@@ -2175,7 +1623,8 @@ namespace SerpiumVPN
                     WpfBrushes.DeepSkyBlue);
                 RelayClientLogTextBox.Clear();
 
-                _routingRegistryEntries = await _secureRoutingRegistry.ListAsync();
+                _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync(cancellationToken))
+                    .Where(item => item.Kind == RoutingTargetKind.Application).ToArray();
                 RoutingRegistryEntry[] enabledRoutingEntries = _routingRegistryEntries
                     .Where(item => item.IsEnabled)
                     .ToArray();
@@ -2184,18 +1633,18 @@ namespace SerpiumVPN
                     entry.Engine,
                     "xray",
                     StringComparison.OrdinalIgnoreCase);
-                bool selectiveRouting = enabledRoutingRuleCount > 0;
+                bool selectiveRouting = true; // The simple screen always routes only selected apps.
 
                 await _routingRuleSetRuntime.UpdateAsync(
                     _routingRegistryEntries,
-                    excludeXrayBridgeProcessesFromFullTunnel: isXrayProfile);
+                    excludeXrayBridgeProcessesFromFullTunnel: isXrayProfile, cancellationToken: cancellationToken);
                 RenderRoutingRegistryCards();
 
                 if (isXrayProfile)
                 {
                     DisposeValidatedProviderRuntimeProfile();
                     SecureXrayVaultProfile savedXray =
-                        await _secureProfileVault.OpenXrayProfileAsync(profileId);
+                        await _secureProfileVault.OpenXrayProfileAsync(profileId, cancellationToken);
                     _validatedRelayProfile = savedXray.Profile;
                     _activeSavedProfileSocksPort = savedXray.SocksPort;
 
@@ -2210,147 +1659,405 @@ namespace SerpiumVPN
                         IOPath.Combine(relayDir, "xray.exe"),
                         IOPath.Combine(relayDir, "configs", "key-client.json"),
                         savedXray.Profile,
-                        savedXray.SocksPort);
+                        savedXray.SocksPort, cancellationToken);
 
-                    RelayClientSocksStateTextBlock.Text = selectiveRouting
-                        ? "Xray готов; запускаем выборочный TUN…"
-                        : "Xray готов; запускаем полный TUN…";
+                    bool wfpRoutingActive = false;
 
-                    _validatedProviderRuntimeProfile =
-                        SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(
-                            profileId,
-                            savedXray.SocksPort,
-                            _routingRegistryEntries,
-                            _routingRuleSetRuntime.RuleSetPath);
-
-                    string singBoxPath = IOPath.Combine(relayDir, "sing-box.exe");
-                    SingBoxCheckResult routingCheck =
-                        await _singBoxValidationService.ValidateAsync(
-                            singBoxPath,
-                            _validatedProviderRuntimeProfile);
-                    if (!routingCheck.Success)
+                    if (UseExperimentalWfpRouting)
                     {
-                        throw new InvalidOperationException(
-                            "sing-box отклонил TUN-маршрутизацию: " +
-                            routingCheck.Message);
+                        WfpAvailabilityResult availability =
+                            await _wfpRoutingController.CheckAvailabilityAsync(cancellationToken);
+
+                        if (availability.Available &&
+                            _serpiumXraySessionManager.ProcessId is int xrayProcessId)
+                        {
+                            try
+                            {
+                                RelayClientSocksStateTextBlock.Text =
+                                    "Xray готов; применяем WFP policy…";
+
+                                WfpRuleSyncResult wfpSync =
+                                    await _wfpRoutingController.SyncApplicationRulesAsync(
+                                        _routingRegistryEntries, cancellationToken);
+                                await _wfpRoutingController.StartBridgeAsync(
+                                    savedXray.SocksPort,
+                                    [xrayProcessId], cancellationToken);
+
+                                wfpRoutingActive = true;
+                                RelayClientLogTextBox.AppendText(
+                                    $"WFP policy generation {wfpSync.PolicyGeneration}: " +
+                                    $"{wfpSync.RuleCount} app rules." +
+                                    Environment.NewLine);
+                            }
+                            catch (Exception wfpError) when (!cancellationToken.IsCancellationRequested)
+                            {
+                                await _wfpRoutingController.StopBridgeAsync();
+                                RelayClientLogTextBox.AppendText(
+                                    "WFP product path недоступен; используем TUN fallback: " +
+                                    NormalizeLifecycleError(wfpError.Message) +
+                                    Environment.NewLine);
+                            }
+                        }
+                        else
+                        {
+                            RelayClientLogTextBox.AppendText(
+                                "WFP product path пока недоступен; используем TUN fallback: " +
+                                NormalizeLifecycleError(availability.Message) +
+                                Environment.NewLine);
+                        }
                     }
 
-                    await _serpiumSingBoxSessionManager.StartAsync(
-                        singBoxPath,
-                        _validatedProviderRuntimeProfile);
+                    if (wfpRoutingActive)
+                    {
+                        _activeSavedProfileUsesRoutingTun = false;
+                        _activeSavedProfileUsesWfpRouting = true;
+                        _activeRoutingHotReloadEnabled = true;
+                        CaptureActiveRoutingSnapshot(enabledRoutingEntries);
 
-                    _activeSavedProfileUsesRoutingTun = true;
-                    _activeRoutingHotReloadEnabled = true;
-                    CaptureActiveRoutingSnapshot(enabledRoutingEntries);
+                        cancellationToken.ThrowIfCancellationRequested();
+                        _activeSavedProfileId = profileId;
+                        ClearSavedProfileFailure();
+                        _currentProviderProfileSaved = true;
+                        RelayDetectedProfileTextBlock.Text =
+                            BuildRelayProfileSummary(savedXray.Profile) +
+                            Environment.NewLine + Environment.NewLine +
+                            "Профиль загружен из Serpium Secure Profile Vault." +
+                            (selectiveRouting
+                                ? Environment.NewLine +
+                                  $"WFP Split Tunnel активен: правил {enabledRoutingRuleCount}; " +
+                                  (_wfpRoutingController.SupportsUdpApplicationRouting
+                                      ? "приложения — TCP + UDP; сайты — TCP по HTTP Host/TLS SNI; без reconnect Relay."
+                                      : "приложения и сайты — TCP; сайты — по HTTP Host/TLS SNI; без reconnect Relay.")
+                                : Environment.NewLine +
+                                  (_wfpRoutingController.SupportsUdpApplicationRouting
+                                      ? "WFP Full Tunnel активен: новые TCP + UDP flows идут через Xray."
+                                      : "WFP TCP Full Tunnel активен; UDP включится после обновления native runtime."));
 
-                    _activeSavedProfileId = profileId;
-                    ClearSavedProfileFailure();
-                    _currentProviderProfileSaved = true;
-                    RelayDetectedProfileTextBlock.Text =
-                        BuildRelayProfileSummary(savedXray.Profile) +
-                        Environment.NewLine + Environment.NewLine +
-                        "Профиль загружен из Serpium Secure Profile Vault." +
-                        (selectiveRouting
-                            ? Environment.NewLine +
-                              $"Выборочная маршрутизация активна: правил {enabledRoutingRuleCount}; " +
-                              "остальной трафик идёт напрямую."
-                            : Environment.NewLine +
-                              "Динамический полный TUN активен: весь новый TCP/UDP " +
-                              "трафик проходит через VPN.");
-                    RelayClientSocksStateTextBlock.Text = selectiveRouting
-                        ? $"Выборочный TUN → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})"
-                        : $"Полный TUN → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})";
-                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
-                    SetRelayStatus(
-                        selectiveRouting
-                            ? $"Статус: Xray подключён; выборочный TUN применил " +
-                              $"{enabledRoutingRuleCount} правил; live reload включён, " +
-                              "остальной трафик direct."
-                            : $"Статус: Xray подключён; полный TUN активен, " +
-                              "live reload включён.",
-                        WpfBrushes.LightGreen);
+                        RelayClientSocksStateTextBlock.Text = selectiveRouting
+                            ? $"WFP {(_wfpRoutingController.SupportsUdpApplicationRouting ? "TCP+UDP" : "TCP")} → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})"
+                            : $"WFP {(_wfpRoutingController.SupportsUdpApplicationRouting ? "TCP+UDP" : "TCP")} Full Tunnel → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})";
+                        RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
+                        SetRelayStatus(
+                            selectiveRouting
+                                ? $"Статус: Xray подключён; WFP применил " +
+                                  $"{enabledRoutingRuleCount} routing rules без переподключения профиля."
+                                : (_wfpRoutingController.SupportsUdpApplicationRouting
+                                    ? "Статус: Xray подключён; WFP TCP+UDP Full Tunnel активен."
+                                    : "Статус: Xray подключён; WFP TCP Full Tunnel активен."),
+                            WpfBrushes.LightGreen);
+                    }
+                    else
+                    {
+                        RelayClientSocksStateTextBlock.Text = selectiveRouting
+                            ? "Xray готов; запускаем выборочный TUN fallback…"
+                            : "Xray готов; запускаем полный TUN fallback…";
+
+                        _validatedProviderRuntimeProfile =
+                            SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(
+                                profileId,
+                                savedXray.SocksPort,
+                                _routingRegistryEntries,
+                                _routingRuleSetRuntime.RuleSetPath);
+
+                        string singBoxPath = IOPath.Combine(relayDir, "sing-box.exe");
+                        SingBoxCheckResult routingCheck =
+                            await _singBoxValidationService.ValidateAsync(
+                                singBoxPath,
+                                _validatedProviderRuntimeProfile, cancellationToken);
+                        if (!routingCheck.Success)
+                        {
+                            throw new InvalidOperationException(
+                                "sing-box отклонил TUN-маршрутизацию: " +
+                                routingCheck.Message);
+                        }
+
+                        await _serpiumSingBoxSessionManager.StartAsync(
+                            singBoxPath,
+                            _validatedProviderRuntimeProfile, cancellationToken);
+
+                        _activeSavedProfileUsesRoutingTun = true;
+                        _activeSavedProfileUsesWfpRouting = false;
+                        _activeRoutingHotReloadEnabled = true;
+                        CaptureActiveRoutingSnapshot(enabledRoutingEntries);
+
+                        cancellationToken.ThrowIfCancellationRequested();
+                        _activeSavedProfileId = profileId;
+                        ClearSavedProfileFailure();
+                        _currentProviderProfileSaved = true;
+                        RelayDetectedProfileTextBlock.Text =
+                            BuildRelayProfileSummary(savedXray.Profile) +
+                            Environment.NewLine + Environment.NewLine +
+                            "Профиль загружен из Serpium Secure Profile Vault." +
+                            (selectiveRouting
+                                ? Environment.NewLine +
+                                  $"TUN fallback активен: правил {enabledRoutingRuleCount}; " +
+                                  "остальной трафик идёт напрямую."
+                                : Environment.NewLine +
+                                  "TUN fallback Full Tunnel активен.");
+                        RelayClientSocksStateTextBlock.Text = selectiveRouting
+                            ? $"TUN fallback → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})"
+                            : $"TUN fallback Full Tunnel → SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})";
+                        RelayClientSocksStateTextBlock.Foreground = WpfBrushes.LightGreen;
+                        SetRelayStatus(
+                            selectiveRouting
+                                ? $"Статус: Xray подключён через TUN fallback; " +
+                                  $"{enabledRoutingRuleCount} правил; live reload включён."
+                                : "Статус: Xray подключён через TUN fallback Full Tunnel.",
+                            WpfBrushes.LightGreen);
+                    }
                 }
                 else
                 {
                     _validatedRelayProfile = null;
                     _activeSavedProfileSocksPort = null;
                     DisposeValidatedProviderRuntimeProfile();
+
                     ProviderRuntimeProfile openedProviderProfile =
-                        await _secureProfileVault.OpenProviderProfileAsync(profileId);
+                        await _secureProfileVault.OpenProviderProfileAsync(profileId, cancellationToken);
                     try
                     {
-                        _validatedProviderRuntimeProfile =
-                            SerpiumRoutingConfigCompiler.CompileProviderProfile(
-                                openedProviderProfile,
-                                _routingRegistryEntries,
-                                _routingRuleSetRuntime.RuleSetPath);
+                        string singBoxRelayDir = IOPath.Combine(
+                            IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                            "bin_files",
+                            "relay");
+                        string singBoxPath =
+                            IOPath.Combine(singBoxRelayDir, "sing-box.exe");
 
-                        openedProviderProfile.Dispose();
+                        bool wfpRoutingActive = false;
+                        string? wfpFallbackReason = null;
+                        WfpRuleSyncResult? wfpSync = null;
+
+                        if (UseExperimentalWfpRouting)
+                        {
+                            WfpAvailabilityResult availability =
+                                await _wfpRoutingController.CheckAvailabilityAsync(cancellationToken);
+
+                            if (availability.Available)
+                            {
+                                int backendSocksPort =
+                                    SerpiumSingBoxSessionManager.FindAvailableLoopbackPort();
+
+                                try
+                                {
+                                    _validatedProviderRuntimeProfile =
+                                        SerpiumRoutingConfigCompiler
+                                            .CompileProviderWfpBackendProfile(
+                                                openedProviderProfile,
+                                                backendSocksPort);
+
+                                    SingBoxCheckResult backendCheck =
+                                        await _singBoxValidationService.ValidateAsync(
+                                            singBoxPath,
+                                            _validatedProviderRuntimeProfile, cancellationToken);
+                                    if (!backendCheck.Success)
+                                    {
+                                        throw new InvalidOperationException(
+                                            "sing-box отклонил WFP backend: " +
+                                            backendCheck.Message);
+                                    }
+
+                                    RelayClientSocksStateTextBlock.Text =
+                                        "WFP backend SOCKS5: запускается…";
+                                    RelayClientSocksStateTextBlock.Foreground =
+                                        WpfBrushes.DeepSkyBlue;
+
+                                    await _serpiumSingBoxSessionManager.StartProxyAsync(
+                                        singBoxPath,
+                                        _validatedProviderRuntimeProfile,
+                                        backendSocksPort, cancellationToken);
+
+                                    if (_serpiumSingBoxSessionManager.ProcessId
+                                        is not int backendProcessId)
+                                    {
+                                        throw new InvalidOperationException(
+                                            "sing-box WFP backend запущен, но PID не подтверждён.");
+                                    }
+
+                                    wfpSync =
+                                        await _wfpRoutingController.SyncApplicationRulesAsync(
+                                            _routingRegistryEntries, cancellationToken);
+                                    await _wfpRoutingController.StartBridgeAsync(
+                                        backendSocksPort,
+                                        [backendProcessId], cancellationToken);
+
+                                    _activeSavedProfileSocksPort = backendSocksPort;
+                                    wfpRoutingActive = true;
+                                }
+                                catch (Exception wfpError) when (!cancellationToken.IsCancellationRequested)
+                                {
+                                    try
+                                    {
+                                        if (_wfpRoutingController.IsBridgeRunning)
+                                            await _wfpRoutingController.StopBridgeAsync();
+                                    }
+                                    catch
+                                    {
+                                    }
+
+                                    try
+                                    {
+                                        if (_serpiumSingBoxSessionManager.HasLiveProcess ||
+                                            _serpiumSingBoxSessionManager.State !=
+                                                RelayGatewayState.Stopped)
+                                        {
+                                            await _serpiumSingBoxSessionManager.StopAsync();
+                                        }
+                                    }
+                                    catch
+                                    {
+                                    }
+
+                                    DisposeValidatedProviderRuntimeProfile();
+                                    wfpFallbackReason =
+                                        NormalizeLifecycleError(wfpError.Message);
+                                }
+                            }
+                            else
+                            {
+                                wfpFallbackReason =
+                                    NormalizeLifecycleError(availability.Message);
+                            }
+                        }
+                        if (wfpRoutingActive)
+                        {
+                            _activeSavedProfileUsesRoutingTun = false;
+                            _activeSavedProfileUsesWfpRouting = true;
+                            _activeRoutingHotReloadEnabled = true;
+                            CaptureActiveRoutingSnapshot(enabledRoutingEntries);
+
+                            cancellationToken.ThrowIfCancellationRequested();
+                            _activeSavedProfileId = profileId;
+                            ClearSavedProfileFailure();
+                            _currentProviderProfileSaved = true;
+
+                            RelayDetectedProfileTextBlock.Text =
+                                BuildProviderRuntimeProfileSummary(
+                                    _validatedProviderRuntimeProfile!) +
+                                Environment.NewLine + Environment.NewLine +
+                                "Профиль загружен из Serpium Secure Profile Vault." +
+                                (selectiveRouting
+                                    ? Environment.NewLine +
+                                      $"WFP Split Tunnel активен: правил {enabledRoutingRuleCount}; " +
+                                      (_wfpRoutingController.SupportsUdpApplicationRouting
+                                          ? "приложения — TCP + UDP; сайты — TCP Host/SNI; без reconnect."
+                                          : "приложения и сайты — TCP через domain bridge; сайты — Host/SNI; без reconnect.")
+                                    : Environment.NewLine +
+                                      (_wfpRoutingController.SupportsUdpApplicationRouting
+                                          ? "WFP TCP+UDP Full Tunnel активен через provider backend."
+                                          : "WFP TCP Full Tunnel активен; UDP включится после обновления native runtime."));
+
+                            RelayClientSocksStateTextBlock.Text =
+                                $"WFP → sing-box SOCKS5 активен " +
+                                $"(127.0.0.1:{_activeSavedProfileSocksPort})";
+                            RelayClientSocksStateTextBlock.Foreground =
+                                WpfBrushes.LightGreen;
+
+                            RelayClientLogTextBox.AppendText(
+                                $"WFP provider backend: generation " +
+                                $"{wfpSync?.PolicyGeneration ?? 0}, " +
+                                $"app rules {wfpSync?.RuleCount ?? 0}." +
+                                Environment.NewLine);
+
+                            string protocols =
+                                _validatedProviderRuntimeProfile!.Protocols.Count > 0
+                                    ? string.Join(
+                                        ", ",
+                                        _validatedProviderRuntimeProfile.Protocols.Select(
+                                            item => item.ToUpperInvariant()))
+                                    : "PROVIDER";
+                            SetRelayStatus(
+                                selectiveRouting
+                                    ? $"Статус: {protocols} подключён через WFP; " +
+                                      $"{enabledRoutingRuleCount} routing rules, без TUN и без reconnect профиля."
+                                    : $"Статус: {protocols} подключён через WFP " +
+                                      (_wfpRoutingController.SupportsUdpApplicationRouting
+                                          ? "TCP+UDP Full Tunnel; TUN не создавался."
+                                          : "TCP Full Tunnel; TUN не создавался."),
+                                WpfBrushes.LightGreen);
+                        }
+                        else
+                        {
+                            _validatedProviderRuntimeProfile =
+                                SerpiumRoutingConfigCompiler.CompileProviderProfile(
+                                    openedProviderProfile,
+                                    _routingRegistryEntries,
+                                    _routingRuleSetRuntime.RuleSetPath,
+                                    applicationSelectionOnly: true);
+
+                            SingBoxCheckResult routingCheck =
+                                await _singBoxValidationService.ValidateAsync(
+                                    singBoxPath,
+                                    _validatedProviderRuntimeProfile, cancellationToken);
+                            if (!routingCheck.Success)
+                            {
+                                throw new InvalidOperationException(
+                                    "sing-box отклонил динамическую маршрутизацию: " +
+                                    routingCheck.Message);
+                            }
+
+                            if (!string.IsNullOrWhiteSpace(wfpFallbackReason))
+                            {
+                                RelayClientLogTextBox.AppendText(
+                                    "WFP provider path недоступен; используем TUN fallback: " +
+                                    wfpFallbackReason +
+                                    Environment.NewLine);
+                            }
+
+                            RelayClientSocksStateTextBlock.Text = "TUN: запускается…";
+                            RelayClientSocksStateTextBlock.Foreground =
+                                WpfBrushes.DeepSkyBlue;
+                            await _serpiumSingBoxSessionManager.StartAsync(
+                                singBoxPath,
+                                _validatedProviderRuntimeProfile, cancellationToken);
+
+                            _activeSavedProfileUsesRoutingTun = true;
+                            _activeSavedProfileUsesWfpRouting = false;
+                            _activeRoutingHotReloadEnabled = true;
+                            CaptureActiveRoutingSnapshot(enabledRoutingEntries);
+
+                            cancellationToken.ThrowIfCancellationRequested();
+                            _activeSavedProfileId = profileId;
+                            ClearSavedProfileFailure();
+                            _currentProviderProfileSaved = true;
+                            RelayDetectedProfileTextBlock.Text =
+                                BuildProviderRuntimeProfileSummary(
+                                    _validatedProviderRuntimeProfile) +
+                                Environment.NewLine + Environment.NewLine +
+                                "Профиль загружен из Serpium Secure Profile Vault.";
+
+                            string protocols =
+                                _validatedProviderRuntimeProfile.Protocols.Count > 0
+                                    ? string.Join(
+                                        ", ",
+                                        _validatedProviderRuntimeProfile.Protocols.Select(
+                                            item => item.ToUpperInvariant()))
+                                    : "AVO";
+                            string activeInterface =
+                                _serpiumSingBoxSessionManager.InterfaceName ??
+                                "Serpium TUN";
+                            SetRelayStatus(
+                                selectiveRouting
+                                    ? $"Статус: сохранённый профиль подключён — {protocols}; " +
+                                      $"выборочный TUN {activeInterface}, правил {enabledRoutingRuleCount}; " +
+                                      "live reload включён, остальной трафик direct."
+                                    : $"Статус: сохранённый профиль подключён — {protocols}; " +
+                                      $"динамический полный TUN {activeInterface}, " +
+                                      "live reload включён.",
+                                WpfBrushes.LightGreen);
+                        }
                     }
-                    catch
+                    finally
                     {
                         openedProviderProfile.Dispose();
-                        throw;
                     }
-
-                    string singBoxRelayDir = IOPath.Combine(
-                        IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
-                        "bin_files",
-                        "relay");
-                    string singBoxPath =
-                        IOPath.Combine(singBoxRelayDir, "sing-box.exe");
-
-                    SingBoxCheckResult routingCheck =
-                        await _singBoxValidationService.ValidateAsync(
-                            singBoxPath,
-                            _validatedProviderRuntimeProfile);
-                    if (!routingCheck.Success)
-                    {
-                        throw new InvalidOperationException(
-                            "sing-box отклонил динамическую маршрутизацию: " +
-                            routingCheck.Message);
-                    }
-
-                    RelayClientSocksStateTextBlock.Text = "TUN: запускается…";
-                    RelayClientSocksStateTextBlock.Foreground = WpfBrushes.DeepSkyBlue;
-                    await _serpiumSingBoxSessionManager.StartAsync(
-                        singBoxPath,
-                        _validatedProviderRuntimeProfile);
-
-                    _activeSavedProfileUsesRoutingTun = true;
-                    _activeRoutingHotReloadEnabled = true;
-                    CaptureActiveRoutingSnapshot(enabledRoutingEntries);
-
-                    _activeSavedProfileId = profileId;
-                    ClearSavedProfileFailure();
-                    _currentProviderProfileSaved = true;
-                    RelayDetectedProfileTextBlock.Text =
-                        BuildProviderRuntimeProfileSummary(_validatedProviderRuntimeProfile) +
-                        Environment.NewLine + Environment.NewLine +
-                        "Профиль загружен из Serpium Secure Profile Vault.";
-
-                    string protocols = _validatedProviderRuntimeProfile.Protocols.Count > 0
-                        ? string.Join(", ", _validatedProviderRuntimeProfile.Protocols.Select(
-                            item => item.ToUpperInvariant()))
-                        : "AVO";
-                    string activeInterface =
-                        _serpiumSingBoxSessionManager.InterfaceName ?? "Serpium TUN";
-                    SetRelayStatus(
-                        selectiveRouting
-                            ? $"Статус: сохранённый профиль подключён — {protocols}; " +
-                              $"выборочный TUN {activeInterface}, правил {enabledRoutingRuleCount}; " +
-                              "live reload включён, остальной трафик direct."
-                            : $"Статус: сохранённый профиль подключён — {protocols}; " +
-                              $"динамический полный TUN {activeInterface}, " +
-                              "live reload включён.",
-                        WpfBrushes.LightGreen);
                 }
             }
             catch (Exception ex)
             {
                 await StopAllRelayTransportsBestEffortAsync();
-                _failedSavedProfileId = profileId;
-                _failedSavedProfileMessage = NormalizeLifecycleError(ex.Message);
+                bool canceled = cancellationToken.IsCancellationRequested;
+                _failedSavedProfileId = canceled ? null : profileId;
+                _failedSavedProfileMessage = canceled ? null : NormalizeLifecycleError(ex.Message);
                 _activeSavedProfileId = null;
                 _activeSavedProfileSocksPort = null;
                 ClearActiveRoutingSnapshot();
@@ -2360,8 +2067,10 @@ namespace SerpiumVPN
                 _routingRuleSetRuntime.DeleteBestEffort();
                 RelayLifecycleRecovery.DeleteGeneratedSecrets(AppContext.BaseDirectory);
                 SetRelayStatus(
-                    "Статус: сохранённый профиль не подключён — " + ex.Message,
-                    WpfBrushes.OrangeRed);
+                    canceled ? "Статус: подключение остановлено." : "Статус: сохранённый профиль не подключён — " + ex.Message,
+                    canceled ? WpfBrushes.Gray : WpfBrushes.OrangeRed);
+                if (canceled) throw new OperationCanceledException(cancellationToken);
+                if (propagateFailure) throw;
             }
             finally
             {
@@ -2418,6 +2127,18 @@ namespace SerpiumVPN
             Exception? stopError = null;
             try
             {
+                if (_wfpRoutingController.IsBridgeRunning)
+                {
+                    try
+                    {
+                        await _wfpRoutingController.StopBridgeAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        stopError ??= ex;
+                    }
+                }
+
                 if (_serpiumSingBoxSessionManager.HasLiveProcess ||
                     _serpiumSingBoxSessionManager.State is RelayGatewayState.Starting or
                         RelayGatewayState.Running or RelayGatewayState.Stopping or
@@ -2525,7 +2246,8 @@ namespace SerpiumVPN
         {
             try
             {
-                _routingRegistryEntries = await _secureRoutingRegistry.ListAsync();
+                _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync())
+                    .Where(item => item.Kind == RoutingTargetKind.Application).ToArray();
                 RenderRoutingRegistryCards();
 
                 UpdateRoutingSummaryStatus();
@@ -2567,8 +2289,23 @@ namespace SerpiumVPN
             _activeSavedProfileRoutingRuleVersions =
                 new Dictionary<Guid, long>();
             _activeSavedProfileUsesRoutingTun = false;
+            _activeSavedProfileUsesWfpRouting = false;
             _activeRoutingHotReloadEnabled = false;
             _activeSavedProfileRoutingRuleCount = 0;
+            _wfpAutomaticFallbackReason = null;
+            _wfpAutomaticFallbackAt = null;
+            _pendingRoutingFlowEntryId = null;
+            _pendingRoutingFlowDisplayName = null;
+            _pendingRoutingFlowLastObservedVpn = null;
+            _pendingRoutingFlowFullTunnel = false;
+            _lastRoutingFlowConfirmationText = null;
+            _observedRoutingApplicationRoutes.Clear();
+            _activeRoutingApplicationFlows.Clear();
+            _activeConnectionMonitorAvailable = true;
+            _lastRoutingFlowClosedCount = 0;
+            _pendingExpectedRouteFlowObserved = false;
+            _pendingPostSwitchSnapshotSeen = false;
+            _routingFlowTransitionGeneration++;
         }
 
         private static string BuildRoutingEntryLabel(
@@ -2622,6 +2359,180 @@ namespace SerpiumVPN
                 : visible;
         }
 
+        private async Task<bool> TryRecoverActiveWfpToTunFallbackAsync(
+            Guid profileId,
+            SecureProfileVaultEntry entry,
+            string reason)
+        {
+            string normalizedReason = NormalizeLifecycleError(reason);
+
+            try
+            {
+                SetRelayStatus(
+                    "Статус: WFP недоступен; переключаем маршрутизацию на безопасный TUN fallback…",
+                    WpfBrushes.Goldenrod);
+
+                try
+                {
+                    if (_wfpRoutingController.IsBridgeRunning)
+                        await _wfpRoutingController.StopBridgeAsync();
+                }
+                catch
+                {
+                    // Renewable WFP lease remains DIRECT fail-open even if the
+                    // bridge process cannot finish its graceful stop.
+                }
+
+                _routingRegistryEntries =
+                    await _secureRoutingRegistry.ListAsync();
+
+                bool isXrayProfile = string.Equals(
+                    entry.Engine,
+                    "xray",
+                    StringComparison.OrdinalIgnoreCase);
+
+                await _routingRuleSetRuntime.UpdateAsync(
+                    _routingRegistryEntries,
+                    excludeXrayBridgeProcessesFromFullTunnel: isXrayProfile);
+
+                string relayDir = IOPath.Combine(
+                    IOPath.TrimEndingDirectorySeparator(AppContext.BaseDirectory),
+                    "bin_files",
+                    "relay");
+                string singBoxPath = IOPath.Combine(relayDir, "sing-box.exe");
+
+                DisposeValidatedProviderRuntimeProfile();
+
+                if (isXrayProfile)
+                {
+                    if (!_serpiumXraySessionManager.HasLiveProcess ||
+                        _serpiumXraySessionManager.State == RelayGatewayState.Failed)
+                    {
+                        throw new InvalidOperationException(
+                            "Xray transport недоступен; routing-only fallback невозможен.");
+                    }
+
+                    SecureXrayVaultProfile savedXray =
+                        await _secureProfileVault.OpenXrayProfileAsync(profileId);
+
+                    _validatedRelayProfile = savedXray.Profile;
+                    _activeSavedProfileSocksPort = savedXray.SocksPort;
+                    _validatedProviderRuntimeProfile =
+                        SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(
+                            profileId,
+                            savedXray.SocksPort,
+                            _routingRegistryEntries,
+                            _routingRuleSetRuntime.RuleSetPath);
+
+                    SingBoxCheckResult routingCheck =
+                        await _singBoxValidationService.ValidateAsync(
+                            singBoxPath,
+                            _validatedProviderRuntimeProfile);
+                    if (!routingCheck.Success)
+                    {
+                        throw new InvalidOperationException(
+                            "sing-box отклонил аварийный TUN fallback: " +
+                            routingCheck.Message);
+                    }
+
+                    if (_serpiumSingBoxSessionManager.HasLiveProcess ||
+                        _serpiumSingBoxSessionManager.State != RelayGatewayState.Stopped)
+                    {
+                        await _serpiumSingBoxSessionManager.StopAsync();
+                    }
+
+                    await _serpiumSingBoxSessionManager.StartAsync(
+                        singBoxPath,
+                        _validatedProviderRuntimeProfile);
+
+                    RelayClientSocksStateTextBlock.Text =
+                        $"TUN fallback → Xray SOCKS5 активен (127.0.0.1:{savedXray.SocksPort})";
+                }
+                else
+                {
+                    ProviderRuntimeProfile openedProviderProfile =
+                        await _secureProfileVault.OpenProviderProfileAsync(profileId);
+                    try
+                    {
+                        if (_serpiumSingBoxSessionManager.HasLiveProcess ||
+                            _serpiumSingBoxSessionManager.State != RelayGatewayState.Stopped)
+                        {
+                            await _serpiumSingBoxSessionManager.StopAsync();
+                        }
+
+                        _activeSavedProfileSocksPort = null;
+                        _validatedRelayProfile = null;
+                        _validatedProviderRuntimeProfile =
+                            SerpiumRoutingConfigCompiler.CompileProviderProfile(
+                                openedProviderProfile,
+                                _routingRegistryEntries,
+                                _routingRuleSetRuntime.RuleSetPath,
+                                applicationSelectionOnly: true);
+
+                        SingBoxCheckResult routingCheck =
+                            await _singBoxValidationService.ValidateAsync(
+                                singBoxPath,
+                                _validatedProviderRuntimeProfile);
+                        if (!routingCheck.Success)
+                        {
+                            throw new InvalidOperationException(
+                                "sing-box отклонил provider TUN fallback: " +
+                                routingCheck.Message);
+                        }
+
+                        await _serpiumSingBoxSessionManager.StartAsync(
+                            singBoxPath,
+                            _validatedProviderRuntimeProfile);
+                    }
+                    finally
+                    {
+                        openedProviderProfile.Dispose();
+                    }
+
+                    RelayClientSocksStateTextBlock.Text =
+                        "TUN fallback активен";
+                }
+
+                _activeSavedProfileUsesWfpRouting = false;
+                _activeSavedProfileUsesRoutingTun = true;
+                _activeRoutingHotReloadEnabled = true;
+                CaptureActiveRoutingSnapshot(_routingRegistryEntries);
+
+                _wfpAutomaticFallbackReason = normalizedReason;
+                _wfpAutomaticFallbackAt = DateTimeOffset.Now;
+                WfpProductReadiness.Invalidate();
+
+                RelayClientSocksStateTextBlock.Foreground =
+                    WpfBrushes.Goldenrod;
+
+                RelayClientLogTextBox.AppendText(
+                    "WFP → TUN automatic fallback: " +
+                    normalizedReason +
+                    ". Relay-профиль остаётся активным; новые flows используют TUN fallback." +
+                    Environment.NewLine);
+                RelayClientLogTextBox.ScrollToEnd();
+
+                SetRelayStatus(
+                    isXrayProfile
+                        ? "Статус: Xray остался подключён; маршрутизация автоматически переведена с WFP на TUN fallback."
+                        : "Статус: provider-маршрутизация автоматически восстановлена через TUN fallback.",
+                    WpfBrushes.Goldenrod);
+
+                UpdateRoutingSummaryStatus();
+                RenderRoutingRegistryCards();
+                return true;
+            }
+            catch (Exception fallbackError)
+            {
+                RelayClientLogTextBox.AppendText(
+                    "Automatic WFP → TUN fallback failed: " +
+                    NormalizeLifecycleError(fallbackError.Message) +
+                    Environment.NewLine);
+                RelayClientLogTextBox.ScrollToEnd();
+                return false;
+            }
+        }
+
         private async Task<bool> TryApplyLiveRoutingRulesAsync(
             string operationDescription)
         {
@@ -2629,6 +2540,73 @@ namespace SerpiumVPN
             {
                 UpdateRoutingSummaryStatus();
                 return false;
+            }
+
+            if (_activeSavedProfileUsesWfpRouting)
+            {
+                if (!_activeRoutingHotReloadEnabled ||
+                    !_wfpRoutingController.IsBridgeRunning)
+                {
+                    SetRoutingStatus(
+                        "WFP bridge не активен: новые соединения работают DIRECT fail-open.",
+                        WpfBrushes.Goldenrod);
+                    return false;
+                }
+
+                try
+                {
+                    WfpRuleSyncResult sync =
+                        await _wfpRoutingController.SyncApplicationRulesAsync(
+                            _routingRegistryEntries);
+                    CaptureActiveRoutingSnapshot(_routingRegistryEntries);
+
+                    RelayClientLogTextBox.AppendText(
+                        $"WFP policy update: generation {sync.PolicyGeneration}, " +
+                        $"app rules {sync.RuleCount}; domain policy обновлена. Уже открытые TCP flows сохраняют " +
+                        "свою предыдущую policy generation." +
+                        Environment.NewLine);
+                    RelayClientLogTextBox.ScrollToEnd();
+
+                    UpdateRoutingSummaryStatus();
+                    RenderRoutingRegistryCards();
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    try
+                    {
+                        await _wfpRoutingController.StopBridgeAsync();
+                    }
+                    catch
+                    {
+                        // The renewable route lease still expires to DIRECT fail-open.
+                    }
+
+                    SecureProfileVaultEntry? activeFallbackEntry =
+                        _savedProfileEntries.FirstOrDefault(
+                            item => item.Id == _activeSavedProfileId.Value);
+
+                    if (activeFallbackEntry is not null &&
+                        await TryRecoverActiveWfpToTunFallbackAsync(
+                            _activeSavedProfileId.Value,
+                            activeFallbackEntry,
+                            $"{operationDescription}: WFP policy update failed — {ex.Message}"))
+                    {
+                        SetRoutingStatus(
+                            $"{operationDescription} сохранено; WFP policy не обновилась, " +
+                            "поэтому активный профиль автоматически переведён на TUN fallback.",
+                            WpfBrushes.Goldenrod);
+                        return true;
+                    }
+
+                    SetRoutingStatus(
+                        $"{operationDescription} сохранено, но WFP policy не обновлена: " +
+                        NormalizeLifecycleError(ex.Message) +
+                        ". TUN fallback также не поднялся; новые соединения остаются DIRECT fail-open.",
+                        WpfBrushes.OrangeRed);
+                    RenderRoutingRegistryCards();
+                    return false;
+                }
             }
 
             if (!_activeRoutingHotReloadEnabled ||
@@ -2663,9 +2641,8 @@ namespace SerpiumVPN
                         _routingRegistryEntries,
                         excludeXrayBridgeProcesses);
 
-                // Local rule-sets are watched by sing-box. A short debounce keeps
-                // the UI from claiming success before the filesystem event is read.
-                await Task.Delay(350);
+                // A local challenge proves that the engine loaded this exact policy revision.
+                await _serpiumSingBoxSessionManager.WaitForRoutingPolicyAsync(update.ActivationProbe);
                 CaptureActiveRoutingSnapshot(_routingRegistryEntries);
 
                 string updateDescription = update.EnabledRuleCount == 0
@@ -2696,10 +2673,484 @@ namespace SerpiumVPN
             }
         }
 
+        private async Task<int> AccelerateRoutingFlowTransitionAsync(
+            RoutingRegistryEntry entry)
+        {
+            if (!_activeSavedProfileUsesRoutingTun ||
+                entry.Kind != RoutingTargetKind.Application)
+            {
+                return 0;
+            }
+
+            int enabledRuleCount =
+                _routingRegistryEntries.Count(item => item.IsEnabled);
+
+            bool expectedVpn =
+                (_routingRuleSetRuntime.FullTunnelWhenEmpty && enabledRuleCount == 0) ||
+                entry.IsEnabled;
+
+            SingBoxObservedRoute desiredRoute =
+                expectedVpn
+                    ? SingBoxObservedRoute.Vpn
+                    : SingBoxObservedRoute.Direct;
+
+            string[] processPaths =
+                new[] { entry.PrimaryValue }
+                    .Concat(entry.RelatedExecutables)
+                    .Where(path => !string.IsNullOrWhiteSpace(path))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+
+            if (processPaths.Length == 0)
+                return 0;
+
+            int generation =
+                _routingFlowTransitionGeneration;
+
+            DateTimeOffset deadline =
+                DateTimeOffset.UtcNow.AddSeconds(5);
+
+            int totalClosed = 0;
+            int stableZeroPasses = 0;
+
+            try
+            {
+                // Dynamic rule-set reload is asynchronous inside sing-box.
+                // Keep removing only stale opposite-route connections during
+                // that propagation window. Six clean passes give roughly a
+                // one-second stable window before we stop convergence.
+                while (DateTimeOffset.UtcNow < deadline &&
+                       generation == _routingFlowTransitionGeneration &&
+                       _pendingRoutingFlowEntryId == entry.Id)
+                {
+                    int closed =
+                        await _serpiumSingBoxSessionManager
+                            .CloseOppositeRouteConnectionsAsync(
+                                processPaths,
+                                desiredRoute);
+
+                    totalClosed += closed;
+                    _lastRoutingFlowClosedCount =
+                        totalClosed;
+
+                    if (closed > 0)
+                    {
+                        stableZeroPasses = 0;
+
+                        SetRoutingStatus(
+                            BuildPendingRoutingFlowStatus() +
+                            " • сводим маршруты",
+                            WpfBrushes.Goldenrod);
+                    }
+                    else
+                    {
+                        stableZeroPasses++;
+                    }
+
+                    if (stableZeroPasses >= 6)
+                        break;
+
+                    await Task.Delay(160);
+                }
+
+                if (totalClosed > 0)
+                {
+                    RelayClientLogTextBox.AppendText(
+                        $"Routing convergence: {entry.DisplayName}; " +
+                        $"закрыто старых flows: {totalClosed}; " +
+                        $"целевой маршрут: {(expectedVpn ? "VPN" : "DIRECT")}." +
+                        Environment.NewLine);
+                    RelayClientLogTextBox.ScrollToEnd();
+                }
+
+                // A snapshot/short-flow event may already have supplied all
+                // confirmation evidence while the loop was running.
+                TryConfirmPendingRoutingTransition();
+
+                return totalClosed;
+            }
+            catch (Exception ex)
+            {
+                RelayClientLogTextBox.AppendText(
+                    $"Routing convergence failed for {entry.DisplayName}: " +
+                    NormalizeLifecycleError(ex.Message) +
+                    Environment.NewLine);
+                RelayClientLogTextBox.ScrollToEnd();
+
+                // The routing policy itself remains applied. Monitoring keeps
+                // showing the real state if convergence acceleration fails.
+                return totalClosed;
+            }
+        }
+
+        private void BeginRoutingFlowConfirmation(
+            RoutingRegistryEntry entry)
+        {
+            if (!_activeSavedProfileUsesRoutingTun ||
+                entry.Kind != RoutingTargetKind.Application)
+            {
+                return;
+            }
+
+            int enabledRuleCount =
+                _routingRegistryEntries.Count(item => item.IsEnabled);
+
+            bool fullTunnel = _routingRuleSetRuntime.FullTunnelWhenEmpty && enabledRuleCount == 0;
+            bool expectedVpn =
+                fullTunnel || entry.IsEnabled;
+
+            _routingFlowTransitionGeneration++;
+
+            _pendingRoutingFlowEntryId = entry.Id;
+            _pendingRoutingFlowExpectedVpn = expectedVpn;
+            _pendingRoutingFlowFullTunnel = fullTunnel;
+            _lastRoutingFlowClosedCount = 0;
+            _pendingExpectedRouteFlowObserved = false;
+            _pendingPostSwitchSnapshotSeen = false;
+            _pendingRoutingFlowDisplayName = entry.DisplayName;
+            _lastRoutingFlowConfirmationText = null;
+
+            _pendingRoutingFlowLastObservedVpn =
+                _observedRoutingApplicationRoutes.TryGetValue(
+                    entry.Id,
+                    out var observed)
+                    ? observed.ViaVpn
+                    : null;
+
+            SetRoutingStatus(
+                BuildPendingRoutingFlowStatus(),
+                WpfBrushes.Goldenrod);
+
+            RenderRoutingRegistryCards();
+        }
+
+        private string BuildPendingRoutingFlowStatus()
+        {
+            string displayName =
+                _pendingRoutingFlowDisplayName ?? "Приложение";
+            string desired =
+                _pendingRoutingFlowExpectedVpn
+                    ? (_pendingRoutingFlowFullTunnel
+                        ? "VPN (Full Tunnel)"
+                        : "VPN")
+                    : "DIRECT";
+
+            if (!_activeConnectionMonitorAvailable)
+                return $"{displayName} → {desired} • монитор недоступен";
+
+            string closeSuffix =
+                _lastRoutingFlowClosedCount > 0
+                    ? $" • закрыто старых: {_lastRoutingFlowClosedCount}"
+                    : string.Empty;
+
+            string evidenceSuffix =
+                _pendingExpectedRouteFlowObserved
+                    ? " • новый маршрут уже замечен"
+                    : string.Empty;
+
+            if (!_pendingRoutingFlowEntryId.HasValue ||
+                !_activeRoutingApplicationFlows.TryGetValue(
+                    _pendingRoutingFlowEntryId.Value,
+                    out RoutingActiveFlowCounts counts) ||
+                counts.Total == 0)
+                return $"{displayName} → {desired} • ждём активный flow" + closeSuffix + evidenceSuffix;
+
+            if (_pendingRoutingFlowExpectedVpn)
+                return counts.Direct > 0
+                    ? $"{displayName} → {desired} • VPN {counts.Vpn} / DIRECT {counts.Direct}" + closeSuffix + evidenceSuffix
+                    : $"{displayName} → {desired} • VPN {counts.Vpn}" + closeSuffix + evidenceSuffix;
+
+            return counts.Vpn > 0
+                ? $"{displayName} → DIRECT • VPN {counts.Vpn} / DIRECT {counts.Direct}" + closeSuffix + evidenceSuffix
+                : $"{displayName} → DIRECT • DIRECT {counts.Direct}" + closeSuffix + evidenceSuffix;
+        }
+
+        private void HandleExpectedRouteFlowEvidence(
+            SingBoxFlowRouteObservation observation)
+        {
+            if (!_pendingRoutingFlowEntryId.HasValue ||
+                string.IsNullOrWhiteSpace(_pendingRoutingFlowDisplayName))
+            {
+                return;
+            }
+
+            RoutingRegistryEntry? entry =
+                FindRoutingApplicationByProcessPath(
+                    observation.ProcessPath);
+
+            if (entry is null ||
+                entry.Id != _pendingRoutingFlowEntryId.Value)
+            {
+                return;
+            }
+
+            bool viaVpn =
+                observation.Route == SingBoxObservedRoute.Vpn;
+
+            if (viaVpn != _pendingRoutingFlowExpectedVpn)
+                return;
+
+            _pendingExpectedRouteFlowObserved = true;
+            TryConfirmPendingRoutingTransition();
+        }
+
+        private void TryConfirmPendingRoutingTransition()
+        {
+            if (!_pendingRoutingFlowEntryId.HasValue ||
+                string.IsNullOrWhiteSpace(_pendingRoutingFlowDisplayName) ||
+                !_activeConnectionMonitorAvailable ||
+                !_pendingPostSwitchSnapshotSeen)
+            {
+                return;
+            }
+
+            _activeRoutingApplicationFlows.TryGetValue(
+                _pendingRoutingFlowEntryId.Value,
+                out RoutingActiveFlowCounts counts);
+
+            int oppositeCount =
+                _pendingRoutingFlowExpectedVpn
+                    ? counts.Direct
+                    : counts.Vpn;
+
+            int desiredCount =
+                _pendingRoutingFlowExpectedVpn
+                    ? counts.Vpn
+                    : counts.Direct;
+
+            bool expectedRouteProven =
+                desiredCount > 0 ||
+                _pendingExpectedRouteFlowObserved;
+
+            if (!expectedRouteProven || oppositeCount > 0)
+                return;
+
+            string routeText =
+                _pendingRoutingFlowExpectedVpn
+                    ? (_pendingRoutingFlowFullTunnel
+                        ? "VPN (Full Tunnel)"
+                        : "VPN")
+                    : "DIRECT";
+
+            string evidenceText =
+                counts.Total > 0
+                    ? $"{counts.Total} активн."
+                    : "новый flow подтверждён";
+
+            _lastRoutingFlowConfirmationText =
+                $"{_pendingRoutingFlowDisplayName} → " +
+                $"{routeText} ✓ • {evidenceText}";
+
+            _pendingRoutingFlowEntryId = null;
+            _pendingRoutingFlowDisplayName = null;
+            _pendingRoutingFlowLastObservedVpn = null;
+            _pendingRoutingFlowFullTunnel = false;
+            _lastRoutingFlowClosedCount = 0;
+            _pendingExpectedRouteFlowObserved = false;
+            _pendingPostSwitchSnapshotSeen = false;
+
+            SetRoutingStatus(
+                _lastRoutingFlowConfirmationText,
+                WpfBrushes.LightGreen);
+
+            RenderRoutingRegistryCards();
+        }
+
+        private void HandleActiveTunConnectionsSnapshot(
+            SingBoxActiveConnectionsSnapshot snapshot)
+        {
+            _activeConnectionMonitorAvailable = snapshot.ApiAvailable;
+            _activeRoutingApplicationFlows.Clear();
+
+            if (snapshot.ApiAvailable)
+            {
+                foreach (SingBoxActiveConnection connection in snapshot.Connections)
+                {
+                    RoutingRegistryEntry? entry =
+                        FindRoutingApplicationByProcessPath(connection.ProcessPath);
+                    if (entry is null)
+                        continue;
+
+                    _activeRoutingApplicationFlows.TryGetValue(
+                        entry.Id,
+                        out RoutingActiveFlowCounts counts);
+
+                    counts = connection.Route == SingBoxObservedRoute.Direct
+                        ? counts with { Direct = counts.Direct + 1 }
+                        : counts with { Vpn = counts.Vpn + 1 };
+
+                    _activeRoutingApplicationFlows[entry.Id] = counts;
+                }
+            }
+
+            if (_pendingRoutingFlowEntryId.HasValue &&
+                _pendingRoutingFlowDisplayName is not null)
+            {
+                _pendingPostSwitchSnapshotSeen = true;
+
+                TryConfirmPendingRoutingTransition();
+
+                if (_pendingRoutingFlowEntryId.HasValue)
+                {
+                    SetRoutingStatus(
+                        BuildPendingRoutingFlowStatus(),
+                        snapshot.ApiAvailable
+                            ? WpfBrushes.Goldenrod
+                            : WpfBrushes.OrangeRed);
+                }
+            }
+
+            RenderRoutingRegistryCards();
+        }
+
+        // One-shot INFO-log observations no longer confirm route state.
+
+        private RoutingRegistryEntry? FindRoutingApplicationByProcessPath(
+            string observedPath)
+        {
+            string normalizedObserved =
+                NormalizeRoutingExecutablePath(observedPath);
+
+            if (string.IsNullOrWhiteSpace(normalizedObserved))
+                return null;
+
+            foreach (RoutingRegistryEntry entry in _routingRegistryEntries)
+            {
+                if (entry.Kind != RoutingTargetKind.Application)
+                    continue;
+
+                IEnumerable<string> candidates =
+                    new[] { entry.PrimaryValue }
+                        .Concat(entry.RelatedExecutables);
+
+                foreach (string candidate in candidates)
+                {
+                    if (string.Equals(
+                            NormalizeRoutingExecutablePath(candidate),
+                            normalizedObserved,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return entry;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        private static string NormalizeRoutingExecutablePath(
+            string value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return string.Empty;
+
+            string path = value.Trim().Trim('"');
+
+            if (path.StartsWith(
+                    @"\\?\",
+                    StringComparison.Ordinal) ||
+                path.StartsWith(
+                    @"\??\",
+                    StringComparison.Ordinal))
+            {
+                path = path[4..];
+            }
+
+            try
+            {
+                return IOPath.GetFullPath(path)
+                    .TrimEnd(
+                        IOPath.DirectorySeparatorChar,
+                        IOPath.AltDirectorySeparatorChar);
+            }
+            catch
+            {
+                return path;
+            }
+        }
+
+        private void RefreshWfpProductReadinessStatus(
+            bool force = false)
+        {
+            if (RoutingEngineStatusTextBlock is null)
+                return;
+
+            WfpProductReadinessSnapshot snapshot =
+                _wfpRoutingController.GetProductReadiness(force);
+
+            string activeMode = _activeSavedProfileUsesWfpRouting
+                ? "Сейчас: WFP."
+                : _activeSavedProfileUsesRoutingTun
+                    ? "Сейчас: TUN fallback."
+                    : _activeSavedProfileId.HasValue
+                        ? "Сейчас: Relay без WFP enforcement."
+                        : "Сейчас: Relay не подключён.";
+
+            string automaticFallback = 
+                _activeSavedProfileUsesRoutingTun &&
+                !string.IsNullOrWhiteSpace(_wfpAutomaticFallbackReason)
+                    ? " Авто-fallback активирован."
+                    : string.Empty;
+
+            RoutingEngineStatusTextBlock.Text =
+                snapshot.Summary + " " + activeMode + automaticFallback;
+
+            string fallbackDetail =
+                _activeSavedProfileUsesRoutingTun &&
+                !string.IsNullOrWhiteSpace(_wfpAutomaticFallbackReason)
+                    ? Environment.NewLine +
+                      $"Последний автоматический fallback: {_wfpAutomaticFallbackReason}" +
+                      (_wfpAutomaticFallbackAt.HasValue
+                          ? $" ({_wfpAutomaticFallbackAt.Value:HH:mm:ss})"
+                          : string.Empty)
+                    : string.Empty;
+
+            RoutingEngineStatusTextBlock.ToolTip =
+                snapshot.Detail + fallbackDetail;
+
+            RoutingEngineStatusTextBlock.Foreground =
+                snapshot.Kind switch
+                {
+                    WfpProductReadinessKind.InstalledReady =>
+                        WpfBrushes.LightGreen,
+                    WfpProductReadinessKind.PackagedOnly or
+                    WfpProductReadinessKind.ProductionReadyNotInstalled or
+                    WfpProductReadinessKind.UpdateRequired =>
+                        WpfBrushes.Goldenrod,
+                    WfpProductReadinessKind.RuntimeMissing =>
+                        WpfBrushes.Gray,
+                    _ =>
+                        WpfBrushes.OrangeRed
+                };
+        }
+
         private void UpdateRoutingSummaryStatus()
         {
             if (RoutingStatusTextBlock is null || RoutingStatusIndicator is null)
                 return;
+
+            RefreshWfpProductReadinessStatus();
+
+            if (_activeSavedProfileUsesRoutingTun &&
+                _pendingRoutingFlowEntryId.HasValue &&
+                !string.IsNullOrWhiteSpace(
+                    _pendingRoutingFlowDisplayName))
+            {
+                SetRoutingStatus(
+                    BuildPendingRoutingFlowStatus(),
+                    WpfBrushes.Goldenrod);
+                return;
+            }
+
+            if (_activeSavedProfileUsesRoutingTun &&
+                !string.IsNullOrWhiteSpace(
+                    _lastRoutingFlowConfirmationText))
+            {
+                SetRoutingStatus(
+                    _lastRoutingFlowConfirmationText,
+                    WpfBrushes.LightGreen);
+                return;
+            }
 
             RoutingRegistryEntry[] enabled = _routingRegistryEntries
                 .Where(entry => entry.IsEnabled)
@@ -2714,6 +3165,69 @@ namespace SerpiumVPN
             string selectedCount = FormatRoutingRuleCount(selected.Count);
             string selectedList = FormatRoutingRuleList(selected.Values);
             bool savedProfileActive = _activeSavedProfileId.HasValue;
+
+            if (savedProfileActive && _activeSavedProfileUsesWfpRouting)
+            {
+                RoutingRegistryEntry[] enabledWebsites = enabled
+                    .Where(entry => entry.Kind == RoutingTargetKind.Website)
+                    .ToArray();
+                RoutingRegistryEntry[] enabledApplications = enabled
+                    .Where(entry => entry.Kind == RoutingTargetKind.Application)
+                    .ToArray();
+
+                if (!_wfpRoutingController.IsBridgeRunning)
+                {
+                    SetRoutingStatus(
+                        "WFP bridge остановлен: route enforcement сейчас DIRECT fail-open.",
+                        WpfBrushes.Goldenrod);
+                    return;
+                }
+
+                bool snapshotMatches =
+                    enabled.Length ==
+                        _activeSavedProfileRoutingRuleLabels.Count &&
+                    enabled.All(entry =>
+                        _activeSavedProfileRoutingRuleLabels.ContainsKey(entry.Id) &&
+                        _activeSavedProfileRoutingRuleVersions.TryGetValue(
+                            entry.Id,
+                            out long appliedTicks) &&
+                        appliedTicks == entry.UpdatedUtc.UtcDateTime.Ticks);
+
+                if (snapshotMatches)
+                {
+                    if (enabled.Length == 0)
+                    {
+                        SetRoutingStatus(
+                            (_wfpRoutingController.SupportsUdpApplicationRouting
+                                ? "WFP Full Tunnel активен: новые TCP + UDP flows идут через VPN; toggle без reconnect."
+                                : "WFP TCP Full Tunnel активен; UDP включится после обновления native runtime."),
+                            WpfBrushes.LightGreen);
+                        return;
+                    }
+
+                    string appCount = FormatRoutingRuleCount(
+                        enabledApplications.Length);
+                    string siteCount = FormatRoutingRuleCount(
+                        enabledWebsites.Length);
+                    string selectedWfpList = FormatRoutingRuleList(
+                        enabled.Select(BuildRoutingEntryLabel));
+                    SetRoutingStatus(
+                        $"WFP Split Tunnel активен: приложений {appCount}, сайтов {siteCount}: " +
+                        $"{selectedWfpList}. " +
+                        (_wfpRoutingController.SupportsUdpApplicationRouting
+                            ? "Приложения получают TCP + UDP; сайты — TCP Host/SNI. "
+                            : "Приложения и сайты пока используют TCP; сайты — Host/SNI. ") +
+                        "Существующие flows сохраняют прежнее решение.",
+                        WpfBrushes.LightGreen);
+                    return;
+                }
+
+                SetRoutingStatus(
+                    "Routing Registry изменён, но WFP ещё не подтвердил новую " +
+                    "atomic policy generation. Повторите переключение.",
+                    WpfBrushes.Goldenrod);
+                return;
+            }
 
             if (savedProfileActive && _activeSavedProfileUsesRoutingTun)
             {
@@ -2731,20 +3245,15 @@ namespace SerpiumVPN
                     if (_activeRoutingHotReloadEnabled && selected.Count == 0)
                     {
                         SetRoutingStatus(
-                            "Динамический полный TUN активен: весь новый TCP/UDP-" +
-                            "трафик проходит через VPN. Включите любую карточку — " +
-                            "режим сразу станет выборочным без переподключения.",
+                            "Full Tunnel • новый трафик → VPN",
                             WpfBrushes.LightGreen);
                         return;
                     }
 
                     SetRoutingStatus(
                         _activeRoutingHotReloadEnabled
-                            ? $"Динамически активно {selectedCount}: {selectedList}. " +
-                              "Новые соединения применяют изменения без переподключения; " +
-                              "остальной трафик направляется напрямую."
-                            : $"Активно {selectedCount}: {selectedList}. " +
-                              "Остальной трафик направляется напрямую.",
+                            ? $"Split Tunnel • {selectedCount} • правила готовы"
+                            : $"Split Tunnel • {selectedCount}",
                         WpfBrushes.LightGreen);
                     return;
                 }
@@ -2816,28 +3325,99 @@ namespace SerpiumVPN
             if (fileMissing)
                 return ("Файл не найден", WpfBrushes.OrangeRed);
 
+            bool nativeRoutingActive =
+                _activeSavedProfileUsesRoutingTun ||
+                _activeSavedProfileUsesWfpRouting;
             bool isApplied =
-                _activeSavedProfileUsesRoutingTun &&
+                nativeRoutingActive &&
                 _activeSavedProfileRoutingRuleLabels.ContainsKey(entry.Id);
             bool fullTunnelActive =
-                _activeSavedProfileUsesRoutingTun &&
+                nativeRoutingActive &&
                 _activeRoutingHotReloadEnabled &&
                 _activeSavedProfileRoutingRuleLabels.Count == 0;
 
             if (_activeSavedProfileId.HasValue)
             {
+                if (entry.Kind == RoutingTargetKind.Application &&
+                    _activeSavedProfileUsesRoutingTun)
+                {
+                    if (_pendingRoutingFlowEntryId == entry.Id)
+                    {
+                        string desired =
+                            _pendingRoutingFlowExpectedVpn
+                                ? (_pendingRoutingFlowFullTunnel
+                                    ? "VPN (Full Tunnel)"
+                                    : "VPN")
+                                : "DIRECT";
+
+                        if (_activeRoutingApplicationFlows.TryGetValue(
+                                entry.Id,
+                                out RoutingActiveFlowCounts transitionCounts) &&
+                            transitionCounts.Total > 0)
+                        {
+                            return (
+                                $"Переход → {desired}; VPN {transitionCounts.Vpn} / " +
+                                $"DIRECT {transitionCounts.Direct}",
+                                WpfBrushes.Goldenrod);
+                        }
+
+                        return (
+                            $"Переход → {desired}; ждём flow",
+                            WpfBrushes.Goldenrod);
+                    }
+
+                    if (!_activeConnectionMonitorAvailable)
+                    {
+                        return (
+                            "Фактически: монитор недоступен",
+                            WpfBrushes.OrangeRed);
+                    }
+
+                    if (_activeRoutingApplicationFlows.TryGetValue(
+                            entry.Id,
+                            out RoutingActiveFlowCounts counts) &&
+                        counts.Total > 0)
+                    {
+                        if (counts.Vpn > 0 && counts.Direct > 0)
+                            return (
+                                $"Активно: VPN {counts.Vpn} / DIRECT {counts.Direct}",
+                                WpfBrushes.Goldenrod);
+
+                        if (counts.Vpn > 0)
+                            return (
+                                $"Фактически: VPN • {counts.Vpn}",
+                                WpfBrushes.LightGreen);
+
+                        return (
+                            $"Фактически: DIRECT • {counts.Direct}",
+                            WpfBrushes.Gray);
+                    }
+
+                    return (
+                        "Фактически: активных flows нет",
+                        WpfBrushes.Gray);
+                }
+
                 if (fullTunnelActive)
                 {
                     return (
-                        "Полный TUN: новый трафик проходит через VPN",
+                        _activeSavedProfileUsesWfpRouting
+                            ? (_wfpRoutingController.SupportsUdpApplicationRouting
+                                ? "WFP Full Tunnel: новые TCP + UDP flows через VPN"
+                                : "WFP Full Tunnel: новые TCP flows через VPN")
+                            : "Полный TUN: новый трафик проходит через VPN",
                         WpfBrushes.LightGreen);
                 }
 
                 if (isApplied && entry.IsEnabled)
                     return (
-                        _activeRoutingHotReloadEnabled
-                            ? "Активно; live reload включён"
-                            : "Активно в текущем VPN-туннеле",
+                        _activeSavedProfileUsesWfpRouting
+                            ? (entry.Kind == RoutingTargetKind.Website
+                                ? "WFP domain active; live policy"
+                                : "WFP active; atomic policy generation")
+                            : _activeRoutingHotReloadEnabled
+                                ? "Активно; новые соединения применяют правило"
+                                : "Активно в текущем VPN-туннеле",
                         WpfBrushes.LightGreen);
 
                 if (isApplied)
@@ -3328,7 +3908,29 @@ namespace SerpiumVPN
                     throw new InvalidOperationException("Правило уже отсутствует в реестре.");
 
                 await RefreshRoutingRegistryAsync();
-                await TryApplyLiveRoutingRulesAsync("Изменение правила");
+                bool applied =
+                    await TryApplyLiveRoutingRulesAsync(
+                        "Изменение правила");
+
+                RoutingRegistryEntry? updatedEntry =
+                    _routingRegistryEntries.FirstOrDefault(
+                        item => item.Id == entryId);
+
+                if (applied && updatedEntry is not null)
+                {
+                    BeginRoutingFlowConfirmation(updatedEntry);
+
+                    int closed =
+                        await AccelerateRoutingFlowTransitionAsync(
+                            updatedEntry);
+
+                    if (closed > 0)
+                    {
+                        SetRoutingStatus(
+                            BuildPendingRoutingFlowStatus(),
+                            WpfBrushes.Goldenrod);
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -3491,6 +4093,7 @@ namespace SerpiumVPN
                     await RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(
                         AppContext.BaseDirectory);
                 _routingRuleSetRuntime.DeleteBestEffort();
+                WfpProductReadiness.Invalidate();
 
                 return managerReportedRuntime ||
                        cleanup.ProcessesStopped > 0 ||
@@ -3511,7 +4114,7 @@ namespace SerpiumVPN
             object? sender,
             EventArgs e)
         {
-            if (_relayLifecycleCheckInProgress ||
+            if (_simpleBusy || _relayLifecycleCheckInProgress ||
                 _savedProfileOperationInProgress ||
                 !_activeSavedProfileId.HasValue ||
                 _isRealExit)
@@ -3537,6 +4140,116 @@ namespace SerpiumVPN
                 bool singBoxLive = _serpiumSingBoxSessionManager.HasLiveProcess;
                 bool expectsXray =
                     string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase);
+
+                bool expectsXrayWithWfpRouting =
+                    expectsXray && _activeSavedProfileUsesWfpRouting;
+
+                if (expectsXrayWithWfpRouting)
+                {
+                    bool bridgeLive = _wfpRoutingController.IsBridgeRunning;
+                    RelayGatewayState xrayState = _serpiumXraySessionManager.State;
+                    WfpProductReadinessSnapshot readiness =
+                        _wfpRoutingController.GetProductReadiness();
+
+                    if (xrayState == RelayGatewayState.Failed || !xrayLive)
+                    {
+                        string reason = xrayState == RelayGatewayState.Failed
+                            ? _serpiumXraySessionManager.LastError ??
+                              "Xray завершился с ошибкой"
+                            : "Xray неожиданно завершился";
+
+                        await StopAllRelayTransportsBestEffortAsync();
+                        await MarkSavedProfileRuntimeFailedAsync(
+                            profileId,
+                            reason);
+                        return;
+                    }
+
+                    if (singBoxLive)
+                    {
+                        await StopAllRelayTransportsBestEffortAsync();
+                        await MarkSavedProfileRuntimeFailedAsync(
+                            profileId,
+                            "в WFP-режиме неожиданно запущен второй routing transport");
+                        return;
+                    }
+
+                    if (!bridgeLive || !readiness.CanUseWfp)
+                    {
+                        string reason = !readiness.CanUseWfp
+                            ? readiness.Summary + " " + readiness.Detail
+                            : "WFP bridge остановлен; enforcement перешёл в DIRECT fail-open";
+
+                        if (!await TryRecoverActiveWfpToTunFallbackAsync(
+                                profileId,
+                                entry,
+                                reason))
+                        {
+                            await StopAllRelayTransportsBestEffortAsync();
+                            await MarkSavedProfileRuntimeFailedAsync(
+                                profileId,
+                                reason + "; TUN fallback не поднялся");
+                        }
+                    }
+
+                    return;
+                }
+
+                bool expectsProviderWithWfpRouting =
+                    !expectsXray && _activeSavedProfileUsesWfpRouting;
+
+                if (expectsProviderWithWfpRouting)
+                {
+                    bool bridgeLive = _wfpRoutingController.IsBridgeRunning;
+                    RelayGatewayState backendState =
+                        _serpiumSingBoxSessionManager.State;
+                    WfpProductReadinessSnapshot readiness =
+                        _wfpRoutingController.GetProductReadiness();
+
+                    if (xrayLive)
+                    {
+                        await StopAllRelayTransportsBestEffortAsync();
+                        await MarkSavedProfileRuntimeFailedAsync(
+                            profileId,
+                            "в provider WFP-режиме неожиданно запущен Xray");
+                        return;
+                    }
+
+                    bool routingLayerDegraded =
+                        backendState == RelayGatewayState.Failed ||
+                        !singBoxLive ||
+                        !_serpiumSingBoxSessionManager.IsProxyBackendMode ||
+                        !bridgeLive ||
+                        !readiness.CanUseWfp;
+
+                    if (routingLayerDegraded)
+                    {
+                        string reason =
+                            !readiness.CanUseWfp
+                                ? readiness.Summary + " " + readiness.Detail
+                                : backendState == RelayGatewayState.Failed
+                                    ? _serpiumSingBoxSessionManager.LastError ??
+                                      "sing-box WFP backend завершился с ошибкой"
+                                    : !singBoxLive
+                                        ? "sing-box WFP backend неожиданно завершился"
+                                        : !_serpiumSingBoxSessionManager.IsProxyBackendMode
+                                            ? "WFP backend потерял proxy mode"
+                                            : "WFP bridge остановлен; enforcement перешёл в DIRECT fail-open";
+
+                        if (!await TryRecoverActiveWfpToTunFallbackAsync(
+                                profileId,
+                                entry,
+                                reason))
+                        {
+                            await StopAllRelayTransportsBestEffortAsync();
+                            await MarkSavedProfileRuntimeFailedAsync(
+                                profileId,
+                                reason + "; TUN fallback не поднялся");
+                        }
+                    }
+
+                    return;
+                }
 
                 bool expectsXrayWithRoutingTun =
                     expectsXray && _activeSavedProfileUsesRoutingTun;
@@ -3638,6 +4351,16 @@ namespace SerpiumVPN
 
         private async Task StopAllRelayTransportsBestEffortAsync()
         {
+            try
+            {
+                if (_wfpRoutingController.IsBridgeRunning)
+                    await _wfpRoutingController.StopBridgeAsync();
+            }
+            catch
+            {
+                // WFP lease is fail-open and expires automatically if bridge cleanup cannot complete.
+            }
+
             try
             {
                 if (_serpiumSingBoxSessionManager.HasLiveProcess ||

@@ -2,6 +2,8 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -20,6 +22,7 @@ public static class SerpiumRoutingConfigCompiler
     private const string ProxyDnsTag = "dns-proxy";
     private const string DirectDnsTag = "dns-direct";
     private const string ConnectivityProbeDomain = "www.gstatic.com";
+    private const string WfpBackendInboundTag = "serpium-wfp-socks-in";
     public const string DynamicRuleSetTag = "serpium-routing-live";
     private const int MaximumExecutablePaths = 256;
     private const int MaximumDomains = 256;
@@ -32,8 +35,7 @@ public static class SerpiumRoutingConfigCompiler
         "xray.exe",
         "xray-client.exe",
         "xray-key-client.exe",
-        "SerpiumNet.exe",
-        "winws.exe"
+        "SerpiumNet.exe"
     };
 
     private static readonly string[] XrayBridgeProcessNames =
@@ -56,7 +58,8 @@ public static class SerpiumRoutingConfigCompiler
     public static ProviderRuntimeProfile CompileProviderProfile(
         ProviderRuntimeProfile sourceProfile,
         IReadOnlyList<RoutingRegistryEntry> registryEntries,
-        string? ruleSetPath)
+        string? ruleSetPath,
+        bool applicationSelectionOnly = false)
     {
         ArgumentNullException.ThrowIfNull(sourceProfile);
         ArgumentNullException.ThrowIfNull(registryEntries);
@@ -74,6 +77,15 @@ public static class SerpiumRoutingConfigCompiler
             JsonObject root = ParseRoot(sourceConfiguration);
             JsonObject route = RequireObject(root, "route");
             string proxyTag = ResolveProviderProxyTag(root, route);
+            if (applicationSelectionOnly)
+            {
+                // Provider catch-all rules must not override the user's app switches.
+                route["rules"] = CreateBaseRoute()["rules"]!.DeepClone();
+                if (root["dns"] is JsonObject providerDns)
+                    providerDns["rules"] = new JsonArray();
+            }
+            (int clashApiPort, string clashApiSecret) =
+                ConfigurePrivateClashApi(root);
 
             EnsureDirectOutbound(root);
             ApplyRoutePolicy(
@@ -101,7 +113,97 @@ public static class SerpiumRoutingConfigCompiler
                 CountArray(root, "outbounds"),
                 CountNestedArray(root, "route", "rules"),
                 CountNestedArray(root, "dns", "servers"),
-                BuildSafeSummary(sourceProfile.SafeSchemaSummary, policy));
+                BuildSafeSummary(sourceProfile.SafeSchemaSummary, policy),
+                clashApiPort,
+                clashApiSecret);
+
+            compiledConfiguration = null;
+            return result;
+        }
+        finally
+        {
+            CryptographicOperations.ZeroMemory(sourceConfiguration);
+            if (compiledConfiguration is not null)
+                CryptographicOperations.ZeroMemory(compiledConfiguration);
+        }
+    }
+
+
+    /// <summary>
+    /// Converts a provider-native sing-box profile into a loopback SOCKS5 backend
+    /// for Serpium WFP. No TUN interface or system route is created here:
+    /// WFP owns process selection and the native bridge forwards selected TCP
+    /// flows into this loopback inbound.
+    /// </summary>
+    public static ProviderRuntimeProfile CompileProviderWfpBackendProfile(
+        ProviderRuntimeProfile sourceProfile,
+        int socksPort)
+    {
+        ArgumentNullException.ThrowIfNull(sourceProfile);
+        if (socksPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(socksPort));
+
+        byte[] sourceConfiguration = sourceProfile.CopyConfiguration();
+        byte[]? compiledConfiguration = null;
+        try
+        {
+            JsonObject root = ParseRoot(sourceConfiguration);
+            JsonObject originalRoute = RequireObject(root, "route");
+            string proxyTag = ResolveProviderProxyTag(root, originalRoute);
+
+            // A provider profile may contain a TUN inbound. WFP must be the only
+            // routing owner in this mode, so replace all inbounds with one
+            // loopback-only SOCKS5 listener.
+            root["inbounds"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "socks",
+                    ["tag"] = WfpBackendInboundTag,
+                    ["listen"] = "127.0.0.1",
+                    ["listen_port"] = socksPort
+                }
+            };
+
+            JsonObject backendRoute = new()
+            {
+                ["rules"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["inbound"] = WfpBackendInboundTag,
+                        ["action"] = "sniff"
+                    }
+                },
+                ["auto_detect_interface"] = true,
+                ["final"] = proxyTag
+            };
+
+            if (originalRoute["default_domain_resolver"] is JsonNode resolver)
+            {
+                backendRoute["default_domain_resolver"] =
+                    resolver.DeepClone();
+            }
+
+            root["route"] = backendRoute;
+
+            compiledConfiguration = JsonSerializer.SerializeToUtf8Bytes(
+                root,
+                SerializerOptions);
+
+            ProviderRuntimeProfile result = new(
+                sourceProfile.ProviderName,
+                sourceProfile.ProfileId,
+                sourceProfile.Engine + "+wfp",
+                compiledConfiguration,
+                sourceProfile.Protocols,
+                CountArray(root, "inbounds"),
+                CountArray(root, "outbounds"),
+                CountNestedArray(root, "route", "rules"),
+                CountNestedArray(root, "dns", "servers"),
+                sourceProfile.SafeSchemaSummary.Trim() + Environment.NewLine +
+                "WFP backend: loopback SOCKS5 без TUN/auto_route; " +
+                "выбор процессов выполняет Serpium.Flow.");
 
             compiledConfiguration = null;
             return result;
@@ -188,6 +290,9 @@ public static class SerpiumRoutingConfigCompiler
             ["dns"] = CreateBaseDns(ProxyOutboundTag)
         };
 
+        (int clashApiPort, string clashApiSecret) =
+            ConfigurePrivateClashApi(root);
+
         ApplyRoutePolicy(
             RequireObject(root, "route"),
             policy,
@@ -216,7 +321,9 @@ public static class SerpiumRoutingConfigCompiler
                 CountNestedArray(root, "dns", "servers"),
                 BuildSafeSummary(
                     "Xray SOCKS5 подключён к Serpium TUN без записи конфигурации на диск.",
-                    policy));
+                    policy),
+                clashApiPort,
+                clashApiSecret);
 
             configuration = null;
             return result;
@@ -238,7 +345,9 @@ public static class SerpiumRoutingConfigCompiler
 
     public static byte[] BuildRuleSetSource(
         IReadOnlyList<RoutingRegistryEntry> registryEntries,
-        bool excludeXrayBridgeProcessesFromFullTunnel)
+        bool excludeXrayBridgeProcessesFromFullTunnel,
+        bool fullTunnelWhenEmpty = true,
+        string? activationProbe = null)
     {
         ArgumentNullException.ThrowIfNull(registryEntries);
         RoutingPolicy policy = BuildPolicy(registryEntries);
@@ -246,9 +355,20 @@ public static class SerpiumRoutingConfigCompiler
 
         if (!policy.HasRules)
         {
-            rules.Add(
-                BuildFullTunnelRule(
-                    excludeXrayBridgeProcessesFromFullTunnel));
+            // A contradictory logical match is valid even in engines that reject an
+            // empty rule-set. No process can match both the rule and its inverse.
+            rules.Add(fullTunnelWhenEmpty
+                ? BuildFullTunnelRule(excludeXrayBridgeProcessesFromFullTunnel)
+                : new JsonObject
+                {
+                    ["type"] = "logical",
+                    ["mode"] = "and",
+                    ["rules"] = new JsonArray
+                    {
+                        new JsonObject { ["network"] = new JsonArray("tcp", "udp") },
+                        new JsonObject { ["network"] = new JsonArray("tcp", "udp"), ["invert"] = true }
+                    }
+                });
         }
         else
         {
@@ -274,6 +394,12 @@ public static class SerpiumRoutingConfigCompiler
 
                 rules.Add(domainRule);
             }
+        }
+
+        if (activationProbe is not null)
+        {
+            SfpPolicyAcknowledgement.ValidateProbe(activationProbe);
+            rules.Add(new JsonObject { ["domain"] = new JsonArray(activationProbe) });
         }
 
         JsonObject source = new()
@@ -416,6 +542,41 @@ public static class SerpiumRoutingConfigCompiler
             websiteCards);
     }
 
+    private static (int Port, string Secret)
+        ConfigurePrivateClashApi(JsonObject root)
+    {
+        int port = FindAvailableLoopbackPort();
+        string secret = Convert.ToHexString(
+            RandomNumberGenerator.GetBytes(24));
+
+        JsonObject experimental =
+            root["experimental"] as JsonObject ??
+            new JsonObject();
+
+        root["experimental"] = experimental;
+        experimental["clash_api"] = new JsonObject
+        {
+            ["external_controller"] = $"127.0.0.1:{port}",
+            ["secret"] = secret
+        };
+
+        return (port, secret);
+    }
+
+    private static int FindAvailableLoopbackPort()
+    {
+        TcpListener listener = new(IPAddress.Loopback, 0);
+        try
+        {
+            listener.Start();
+            return ((IPEndPoint)listener.LocalEndpoint).Port;
+        }
+        finally
+        {
+            listener.Stop();
+        }
+    }
+
     private static JsonObject ParseRoot(byte[] configurationUtf8)
     {
         JsonNode? node = JsonNode.Parse(configurationUtf8);
@@ -502,11 +663,7 @@ public static class SerpiumRoutingConfigCompiler
                 },
                 new JsonObject
                 {
-                    ["ip_cidr"] = new JsonArray(
-                        "10.0.0.0/8",
-                        "172.16.0.0/12",
-                        "192.168.0.0/16",
-                        "127.0.0.0/8"),
+                    ["ip_cidr"] = ToJsonArray(SfpDirectRouteExceptions.DestinationCidrs),
                     ["action"] = "route",
                     ["outbound"] = DirectOutboundTag
                 }
@@ -563,6 +720,7 @@ public static class SerpiumRoutingConfigCompiler
         rules.Add(new JsonObject
         {
             ["domain"] = new JsonArray(ConnectivityProbeDomain),
+            ["process_name"] = new JsonArray("SerpiumVPN.exe"),
             ["action"] = "route",
             ["outbound"] = proxyTag
         });
@@ -646,6 +804,8 @@ public static class SerpiumRoutingConfigCompiler
 
         JsonArray originalRules = dns["rules"] as JsonArray ?? new JsonArray();
         JsonArray selectiveRules = new();
+        if (ruleSetPath is not null)
+            SfpPolicyAcknowledgement.AddDnsRules(selectiveRules, DynamicRuleSetTag);
 
         selectiveRules.Add(new JsonObject
         {

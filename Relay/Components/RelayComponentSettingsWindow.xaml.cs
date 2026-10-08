@@ -736,7 +736,7 @@ public partial class RelayComponentSettingsWindow : Window
             RenderCard(kind);
             SetOverallStatus(
                 result.Message,
-                BrushFromHex("#5CFF94"));
+                result.Succeeded ? BrushFromHex("#5CFF94") : MediaBrushes.Goldenrod);
         }
         catch (OperationCanceledException)
         {

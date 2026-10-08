@@ -51,7 +51,9 @@ public static class EncodedKeyEnvelopeDecoder
         "vless://",
         "vmess://",
         "trojan://",
-        "avo://"
+        "avo://",
+        "hysteria2://",
+        "hy2://"
     ];
 
     public static EncodedKeyEnvelopeDecodeResult Decode(string? input)

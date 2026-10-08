@@ -1,5 +1,5 @@
-﻿using System.ComponentModel;
-using System.Diagnostics;
+using System.ComponentModel;
+using System.Security.AccessControl;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -9,6 +9,7 @@ using System.Text.Json;
 using System.Reflection;
 using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.Providers;
+using SerpiumVPN.Relay.Diagnostics;
 
 namespace SerpiumVPN.Relay.ProfileVault;
 
@@ -96,9 +97,11 @@ public sealed class SecureProfileVault
             throw new InvalidOperationException("Профиль слишком велик для защищённого хранилища.");
         }
 
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        bool entered = false;
         try
         {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            entered = true;
             List<VaultRecord> records = ReadRecords();
             try
             {
@@ -159,7 +162,7 @@ public sealed class SecureProfileVault
         {
             if (configuration.Length > 0)
                 CryptographicOperations.ZeroMemory(configuration);
-            _gate.Release();
+            if (entered) _gate.Release();
         }
     }
 
@@ -177,7 +180,6 @@ public sealed class SecureProfileVault
 
         string fingerprint = ComputeSourceFingerprint(sourceKey);
         byte[] payload = SerializeXrayProfile(profile, socksPort);
-        ValidateXrayProfileRoundTrip(payload);
         if (payload.Length > MaxConfigurationBytes)
         {
             CryptographicOperations.ZeroMemory(payload);
@@ -185,9 +187,12 @@ public sealed class SecureProfileVault
                 "Xray-профиль слишком велик для защищённого хранилища.");
         }
 
-        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        bool entered = false;
         try
         {
+            await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            entered = true;
+            ValidateXrayProfileRoundTrip(payload);
             List<VaultRecord> records = ReadRecords();
             try
             {
@@ -248,7 +253,7 @@ public sealed class SecureProfileVault
         {
             if (payload.Length > 0)
                 CryptographicOperations.ZeroMemory(payload);
-            _gate.Release();
+            if (entered) _gate.Release();
         }
     }
 
@@ -341,30 +346,37 @@ public sealed class SecureProfileVault
 
     public async Task<bool> DeleteProfileAsync(
         Guid id,
+        CancellationToken cancellationToken = default) =>
+        await DeleteProfilesAsync([id], cancellationToken).ConfigureAwait(false) > 0;
+
+    public async Task<int> DeleteProfilesAsync(
+        IEnumerable<Guid> ids,
         CancellationToken cancellationToken = default)
     {
+        ArgumentNullException.ThrowIfNull(ids);
+        HashSet<Guid> requested = ids.ToHashSet();
+        if (requested.Count > MaxProfiles) throw new ArgumentException("Слишком много профилей для удаления.", nameof(ids));
+        if (requested.Count == 0) return 0;
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             List<VaultRecord> records = ReadRecords();
             try
             {
-                int index = records.FindIndex(item => item.Id == id);
-                if (index < 0)
-                    return false;
-
-                records[index].Dispose();
-                records.RemoveAt(index);
+                var removed = records.Where(item => requested.Contains(item.Id)).ToArray();
+                if (removed.Length == 0) return 0;
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var record in removed) { records.Remove(record); record.Dispose(); }
 
                 if (records.Count == 0)
                 {
                     DeleteVaultFile();
-                    return true;
+                    return removed.Length;
                 }
 
                 EnsureVaultDirectory();
                 WriteRecords(records);
-                return true;
+                return removed.Length;
             }
             finally
             {
@@ -580,9 +592,9 @@ public sealed class SecureProfileVault
 
     private static string BuildSafeXrayProfileName(SerpiumConnectionProfile profile)
     {
-        string value = !string.IsNullOrWhiteSpace(profile.Name)
+        string value = SensitiveDiagnosticRedactor.SanitizeProfileName(!string.IsNullOrWhiteSpace(profile.Name)
             ? profile.Name.Trim()
-            : profile.Server.Trim();
+            : profile.Server.Trim());
 
         if (value.Length <= 32)
             return value;
@@ -601,14 +613,40 @@ public sealed class SecureProfileVault
         record.RouteRuleCount,
         record.DnsServerCount,
         record.CreatedUtc,
-        record.UpdatedUtc);
+        record.UpdatedUtc) { DisplayLabel = ReadDisplayLabel(record) };
+
+    private static string ReadDisplayLabel(VaultRecord record)
+    {
+        // Existing Xray records retain the original name inside the encrypted payload.
+        // Never substitute the server, user ID, password or an opaque provider ID.
+        if (!record.Engine.Equals("xray", StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(record.Configuration);
+            if (document.RootElement.TryGetProperty("profile", out var profile) &&
+                profile.TryGetProperty("Name", out var name) && name.ValueKind == JsonValueKind.String)
+                return SensitiveDiagnosticRedactor.SanitizeProfileName(name.GetString());
+        }
+        catch (JsonException) { }
+        return string.Empty;
+    }
 
     private List<VaultRecord> ReadRecords()
     {
         if (!File.Exists(_vaultPath))
             return new List<VaultRecord>();
 
-        byte[] container = File.ReadAllBytes(_vaultPath);
+        RejectLinkedPath(_vaultDirectory);
+        RejectLinkedPath(_vaultPath);
+        byte[] container;
+        using (FileStream input = new(_vaultPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+        {
+            long length = input.Length;
+            if (length < ContainerMagic.Length + 8 || length > (long)MaxConfigurationBytes * MaxProfiles + ContainerMagic.Length + 8)
+                throw new InvalidDataException("Некорректный размер зашифрованного Vault.");
+            container = new byte[checked((int)length)];
+            input.ReadExactly(container);
+        }
         byte[]? protectedPayload = null;
         byte[]? plainPayload = null;
         try
@@ -671,6 +709,8 @@ public sealed class SecureProfileVault
         try
         {
             protectedPayload = DpapiProtect(plainPayload);
+            if (protectedPayload.Length > MaxConfigurationBytes * MaxProfiles)
+                throw new InvalidDataException("Защищённое хранилище достигло предельного размера.");
             using MemoryStream containerStream = new();
             using (BinaryWriter writer = new(containerStream, Encoding.UTF8, leaveOpen: true))
             {
@@ -892,47 +932,26 @@ public sealed class SecureProfileVault
     private bool EnsureVaultDirectory()
     {
         Directory.CreateDirectory(_vaultDirectory);
-        return TryHardenDirectoryAcl(_vaultDirectory);
+        RejectLinkedPath(_vaultDirectory);
+        if (File.Exists(_vaultPath)) RejectLinkedPath(_vaultPath);
+        using WindowsIdentity identity = WindowsIdentity.GetCurrent();
+        SecurityIdentifier user = identity.User ??
+            throw new UnauthorizedAccessException("Не удалось определить владельца хранилища профилей.");
+        var security = new DirectorySecurity();
+        security.SetAccessRuleProtection(isProtected: true, preserveInheritance: false);
+        foreach (SecurityIdentifier sid in new[] { user, new SecurityIdentifier(WellKnownSidType.LocalSystemSid, null) })
+            security.AddAccessRule(new FileSystemAccessRule(sid, FileSystemRights.FullControl,
+                InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit,
+                PropagationFlags.None, AccessControlType.Allow));
+        // Replace the DACL, including old explicit grants. A failure prevents saving.
+        new DirectoryInfo(_vaultDirectory).SetAccessControl(security);
+        return true;
     }
 
-    private static bool TryHardenDirectoryAcl(string directoryPath)
+    private static void RejectLinkedPath(string path)
     {
-        try
-        {
-            string? userSid = WindowsIdentity.GetCurrent().User?.Value;
-            if (string.IsNullOrWhiteSpace(userSid))
-                return false;
-
-            ProcessStartInfo startInfo = new()
-            {
-                FileName = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.System),
-                    "icacls.exe"),
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-            startInfo.ArgumentList.Add(directoryPath);
-            startInfo.ArgumentList.Add("/inheritance:r");
-            startInfo.ArgumentList.Add("/grant:r");
-            startInfo.ArgumentList.Add($"*{userSid}:(OI)(CI)F");
-            startInfo.ArgumentList.Add("*S-1-5-18:(OI)(CI)F");
-
-            using Process process = Process.Start(startInfo) ??
-                throw new InvalidOperationException("Не удалось запустить icacls.exe.");
-            if (!process.WaitForExit(10000))
-            {
-                process.Kill(entireProcessTree: true);
-                return false;
-            }
-
-            return process.ExitCode == 0;
-        }
-        catch
-        {
-            return false;
-        }
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            throw new IOException("Хранилище профилей не может быть ссылкой на другой файл или каталог.");
     }
 
     private void TryMarkVaultHidden()

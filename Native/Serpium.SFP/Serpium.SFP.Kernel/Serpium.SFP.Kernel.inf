@@ -1,0 +1,42 @@
+; Serpium Flow Platform kernel core.
+; Demand-start non-PnP KMDF service.
+; Core v1 owns realtime policy/flow state; redirect is not enabled yet.
+
+[Version]
+Signature   = "$WINDOWS NT$"
+Class       = System
+ClassGuid   = {4D36E97D-E325-11CE-BFC1-08002BE10318}
+Provider    = %ProviderName%
+DriverVer   = 09/16/2026,1.0.0.0
+CatalogFile = Serpium.SFP.Kernel.cat
+PnpLockdown = 1
+
+[DefaultInstall.NTamd64]
+CopyFiles = KernelCopyFiles
+
+[DefaultInstall.NTamd64.Services]
+AddService = SerpiumSfp,0x00000002,ServiceInstall
+
+[DestinationDirs]
+KernelCopyFiles = 12
+
+[KernelCopyFiles]
+Serpium.SFP.Kernel.sys
+
+[ServiceInstall]
+DisplayName   = %ServiceDisplayName%
+ServiceType   = 1
+StartType     = 3
+ErrorControl  = 1
+ServiceBinary = %12%\Serpium.SFP.Kernel.sys
+
+[SourceDisksNames]
+1 = %DiskName%,,,
+
+[SourceDisksFiles]
+Serpium.SFP.Kernel.sys = 1
+
+[Strings]
+ProviderName       = "Serpium"
+ServiceDisplayName = "Serpium Flow Platform Kernel"
+DiskName           = "Serpium Flow Platform Kernel"

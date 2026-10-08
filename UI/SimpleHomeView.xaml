@@ -1,0 +1,174 @@
+<UserControl x:Class="SerpiumVPN.UI.SimpleHomeView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             Background="{DynamicResource Theme.Background}" Foreground="{DynamicResource Theme.Text}"
+             FontFamily="Segoe UI" FontSize="14" UseLayoutRounding="True">
+    <UserControl.Resources>
+        <ResourceDictionary>
+            <BooleanToVisibilityConverter x:Key="BooleanVisibility"/>
+            <ResourceDictionary.MergedDictionaries>
+                <ResourceDictionary Source="Themes/HomeControls.xaml"/>
+            </ResourceDictionary.MergedDictionaries>
+        </ResourceDictionary>
+    </UserControl.Resources>
+    <Grid>
+        <Grid.RowDefinitions><RowDefinition Height="80"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+        <Grid Margin="26,0">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                <Image x:Name="BrandLogo" Source="/SerpiumVPN;component/Assets/Serpium.png" Width="40" Height="40" Margin="0,0,12,0"
+                       Stretch="Uniform" RenderOptions.BitmapScalingMode="Fant" SnapsToDevicePixels="True"/>
+                <TextBlock Text="Serpium" FontSize="23" FontWeight="SemiBold" VerticalAlignment="Center"/>
+            </StackPanel>
+            <Button x:Name="UpdatesMenuButton" Grid.Column="1" VerticalAlignment="Center" Padding="12,10" MinHeight="42" Margin="0,0,10,0"
+                    Click="UpdatesMenu_Click" AutomationProperties.Name="Обновления компонентов">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="Обновления" VerticalAlignment="Center"/>
+                    <Ellipse x:Name="UpdateBadge" Fill="{DynamicResource Theme.Accent}" Width="7" Height="7" Margin="8,0,0,0" Visibility="Collapsed"/>
+                </StackPanel>
+            </Button>
+            <Popup x:Name="ComponentUpdatesPopup" PlacementTarget="{Binding ElementName=UpdatesMenuButton}" Placement="Bottom"
+                   StaysOpen="False" AllowsTransparency="True" PopupAnimation="None" KeyDown="Popup_KeyDown">
+                <Border Width="320" Padding="18" Margin="0,6,0,0" CornerRadius="16" Background="{DynamicResource Theme.Surface}"
+                        BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="Обновления компонентов" FontSize="16" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="ComponentUpdateStatus" Foreground="{DynamicResource Theme.Muted}" FontSize="13" TextWrapping="Wrap" Margin="0,10,0,14" AutomationProperties.LiveSetting="Polite"/>
+                        <Button x:Name="ComponentUpdateButton" Content="Проверить обновления" Click="ComponentUpdate_Click" HorizontalAlignment="Left" Padding="12,8" MinHeight="36"/>
+                    </StackPanel>
+                </Border>
+            </Popup>
+            <Button x:Name="ThemeButton" Grid.Column="2" VerticalAlignment="Center" Padding="16,10" MinHeight="42" MinWidth="260"
+                    BorderThickness="0" Click="Theme_Click">
+                <StackPanel Orientation="Horizontal">
+                    <TextBlock Text="◐" FontSize="17" Margin="0,0,9,0" VerticalAlignment="Center"/>
+                    <TextBlock x:Name="ThemeLabel" Text="Тема: Полуночная Змеюка" Width="200" TextTrimming="CharacterEllipsis" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                </StackPanel>
+            </Button>
+        </Grid>
+        <Grid Grid.Row="1" Margin="24,0,24,24">
+            <Grid.ColumnDefinitions><ColumnDefinition Width="0.9*"/><ColumnDefinition Width="16"/><ColumnDefinition Width="1.1*"/></Grid.ColumnDefinitions>
+            <Border x:Name="ConnectionCard" Background="{DynamicResource Theme.Surface}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" CornerRadius="22" Padding="22">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid Margin="0,0,0,18"><Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+                            <Ellipse x:Name="StatusDot" Width="8" Height="8" Fill="{DynamicResource Theme.Muted}" Margin="0,0,10,0"/>
+                            <TextBlock x:Name="ConnectionStatus" Grid.Column="1" Text="Не подключено" FontSize="20" TextWrapping="Wrap" FontWeight="SemiBold" AutomationProperties.LiveSetting="Polite"/>
+                        </Grid>
+                    <Border x:Name="ProfilesPanel" Grid.Row="1" Background="{DynamicResource Theme.Input}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" CornerRadius="14" Padding="8" Margin="0,0,0,12">
+                      <Grid>
+                        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+                        <Grid Margin="4,0,0,6">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBlock Text="Профили" FontWeight="SemiBold" VerticalAlignment="Center"/>
+                            <Button x:Name="NewProfileButton" Grid.Column="1" Content="＋" FontSize="18" Padding="6,0" MinHeight="30" Margin="0,0,5,0" Click="NewProfile_Click" ToolTip="Новый профиль — ввести другой ключ" AutomationProperties.Name="Новый профиль"/>
+                            <Button x:Name="SelectProfilesButton" Grid.Column="2" Content="Выбрать" Padding="9,4" MinHeight="30" Click="SelectProfiles_Click" AutomationProperties.Name="Выбрать несколько профилей для удаления"/>
+                        </Grid>
+                        <ListBox x:Name="ProfileList" Grid.Row="1" Background="Transparent" Foreground="{DynamicResource Theme.Text}" BorderThickness="0" Padding="0"
+                                 SelectedValuePath="Id" SelectionChanged="ProfileList_Changed" AutomationProperties.Name="Сохранённые профили"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto" ScrollViewer.PanningMode="VerticalOnly"
+                                 ScrollViewer.CanContentScroll="True" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="ListBoxItem">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                    <Setter Property="Padding" Value="6,1"/>
+                                    <Setter Property="Margin" Value="0,1"/>
+                                    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+                                        <Border x:Name="ProfileRowBorder" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" Padding="{TemplateBinding Padding}" CornerRadius="9"><ContentPresenter/></Border>
+                                        <ControlTemplate.Triggers>
+                                            <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="ProfileRowBorder" Property="Background" Value="{DynamicResource Theme.Surface}"/></Trigger>
+                                            <Trigger Property="IsSelected" Value="True"><Setter TargetName="ProfileRowBorder" Property="Background" Value="{DynamicResource Theme.Secondary}"/><Setter TargetName="ProfileRowBorder" Property="BorderBrush" Value="{DynamicResource Theme.Focus}"/></Trigger>
+                                            <Trigger Property="IsKeyboardFocusWithin" Value="True"><Setter TargetName="ProfileRowBorder" Property="BorderBrush" Value="{DynamicResource Theme.Focus}"/></Trigger>
+                                            <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.65"/></Trigger>
+                                        </ControlTemplate.Triggers>
+                                    </ControlTemplate></Setter.Value></Setter>
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate><DataTemplate>
+                                <Grid MinHeight="30">
+                                    <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/></Grid.ColumnDefinitions>
+                                    <CheckBox IsChecked="{Binding IsMarked, Mode=TwoWay}" Visibility="{Binding SelectionMode, Converter={StaticResource BooleanVisibility}}" Style="{StaticResource ProfileCheckBox}" Margin="0,0,6,0" Click="ProfileMark_Click" AutomationProperties.Name="{Binding MarkLabel}"/>
+                                    <TextBlock Grid.Column="1" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" Margin="0,0,5,0" ToolTip="{Binding DisplayName}"/>
+                                    <Button Grid.Column="2" Style="{StaticResource ProfileTrashButton}" Click="DeleteProfile_Click" ToolTip="{Binding DeleteLabel}" AutomationProperties.Name="{Binding DeleteLabel}"/>
+                                </Grid>
+                            </DataTemplate></ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock x:Name="EmptyProfilesText" Grid.Row="1" Text="Пока нет профилей. Вставьте ключ ниже." Foreground="{DynamicResource Theme.Muted}" TextWrapping="Wrap" Margin="6,10" IsHitTestVisible="False"/>
+                        <Grid x:Name="BatchProfileTools" Grid.Row="2" Visibility="Collapsed" Margin="4,6,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <CheckBox x:Name="SelectAllProfiles" Content="Все" Style="{StaticResource ProfileCheckBox}" IsThreeState="True" Click="SelectAllProfiles_Click" AutomationProperties.Name="Отметить все профили"/>
+                            <StackPanel Grid.Column="1" Orientation="Horizontal">
+                                <TextBlock x:Name="MarkedProfilesCount" Text="Выбрано: 0" FontSize="12" Foreground="{DynamicResource Theme.Muted}" VerticalAlignment="Center" Margin="0,0,7,0" AutomationProperties.LiveSetting="Polite"/>
+                                <Button x:Name="DeleteMarkedProfilesButton" Style="{StaticResource ProfileTrashButton}" Click="DeleteMarkedProfiles_Click" IsEnabled="False" ToolTip="Удалить отмеченные профили" AutomationProperties.Name="Удалить отмеченные профили"/>
+                            </StackPanel>
+                        </Grid>
+                      </Grid>
+                    </Border>
+                    <Popup x:Name="DeleteConfirmationPopup" PlacementTarget="{Binding ElementName=ProfilesPanel}" Placement="Bottom" StaysOpen="False"
+                           AllowsTransparency="True" PopupAnimation="None" Closed="DeleteConfirmation_Closed" KeyDown="Popup_KeyDown">
+                        <Border Width="320" Padding="16" Margin="0,6,0,0" CornerRadius="14" Background="{DynamicResource Theme.Surface}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1">
+                            <StackPanel x:Name="DeleteConfirmation">
+                                <TextBlock x:Name="DeleteConfirmationText" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Text}"/>
+                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                                    <Button x:Name="ConfirmDeleteButton" Content="Удалить" Click="ConfirmDelete_Click" Padding="10,7" Foreground="{DynamicResource Theme.Error}"/>
+                                    <Button x:Name="CancelDeleteButton" Content="Отмена" Click="CancelDelete_Click" Padding="10,7" Margin="8,0,0,0"/>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+                    </Popup>
+                    <StackPanel Grid.Row="2">
+                        <Label Target="KeyInput" Content="Ключ или ссылка" Foreground="{DynamicResource Theme.Muted}" Padding="0,0,0,8"/>
+                        <Grid>
+                            <PasswordBox x:Name="KeyInput" Height="48" Padding="12" FontSize="15" MaxLength="65536" PasswordChar="●"
+                                         PasswordChanged="KeyInput_Changed" AutomationProperties.Name="Ключ или ссылка на подписку"/>
+                            <TextBlock x:Name="KeyHint" Text="Вставьте ключ или ссылку" TextTrimming="CharacterEllipsis" Foreground="{DynamicResource Theme.Muted}" Margin="13,0" VerticalAlignment="Center" IsHitTestVisible="False"/>
+                        </Grid>
+                        <TextBlock x:Name="KeyEntryStatus" Visibility="Collapsed" Foreground="{DynamicResource Theme.Muted}"
+                                   Margin="0,7,0,0" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                    </StackPanel>
+                    <StackPanel Grid.Row="3">
+                        <Button x:Name="ConnectButton" Content="Подключиться" Height="48" Margin="0,12,0,0"
+                                Background="{DynamicResource Theme.Accent}" Foreground="{DynamicResource Theme.OnAccent}" BorderThickness="0" FontWeight="SemiBold"
+                                IsEnabled="False" Click="Connect_Click"/>
+                        <ScrollViewer x:Name="FeedbackScroll" Visibility="Collapsed" MaxHeight="48" Margin="0,10,0,0" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+                            <TextBlock x:Name="Feedback" Foreground="{DynamicResource Theme.Error}" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
+                        </ScrollViewer>
+                    </StackPanel>
+                </Grid>
+            </Border>
+            <Border Grid.Column="2" Background="{DynamicResource Theme.Surface}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" CornerRadius="22" Padding="20">
+                <Grid>
+                    <Grid.RowDefinitions><RowDefinition Height="36"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <TextBlock Text="Приложения" FontSize="17" FontWeight="SemiBold"/>
+                    <TextBlock Text="VPN" FontSize="12" Foreground="{DynamicResource Theme.Muted}" HorizontalAlignment="Right" Margin="0,3,10,0"/>
+                    <ListBox x:Name="ApplicationList" Grid.Row="1" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource Theme.Text}"
+                             ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="True"
+                             VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
+                        <ListBox.ItemContainerStyle>
+                            <Style TargetType="ListBoxItem">
+                                <Setter Property="Width" Value="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType={x:Type ScrollContentPresenter}}}"/>
+                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+                                <Setter Property="Focusable" Value="False"/>
+                                <Setter Property="Padding" Value="0"/>
+                                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><ContentPresenter/></ControlTemplate></Setter.Value></Setter>
+                            </Style>
+                        </ListBox.ItemContainerStyle>
+                        <ListBox.ItemTemplate>
+                            <DataTemplate>
+                                <Border BorderBrush="{DynamicResource Theme.Divider}" BorderThickness="0,0,0,1" MinHeight="60">
+                                    <Grid>
+                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="48"/></Grid.ColumnDefinitions>
+                                        <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,8,12,8"/>
+                                        <ToggleButton Grid.Column="1" Style="{StaticResource AppToggle}" IsChecked="{Binding IsVpnEnabled, Mode=OneWay}"
+                                                      AutomationProperties.Name="{Binding AccessibleName}" Click="AppToggle_Click"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate>
+                        </ListBox.ItemTemplate>
+                    </ListBox>
+                    <TextBlock x:Name="EmptyListText" Grid.Row="1" Text="Ищем приложения…" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Muted}" Margin="0,15,0,0" IsHitTestVisible="False"/>
+                </Grid>
+            </Border>
+        </Grid>
+    </Grid>
+</UserControl>

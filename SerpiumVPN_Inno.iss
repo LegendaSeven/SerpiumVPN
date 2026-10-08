@@ -3,7 +3,7 @@
 
 #define MyAppName "SerpiumVPN"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.56.4"
+#define MyAppVersion "1.0.56.6"
 #endif
 #define MyAppPublisher "Serpium"
 #define ProjectRoot SourcePath
@@ -17,6 +17,8 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\SerpiumVPN
 DefaultGroupName=SerpiumVPN
 PrivilegesRequired=admin
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
 OutputDir={#ProjectRoot}\publish\installer
 OutputBaseFilename=SerpiumVPN_Setup
 Compression=lzma
@@ -35,14 +37,15 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Source: "{#SourceDir}\SerpiumVPN.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\SerpiumUpdater.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\*"; Excludes: "bin_files,SerpiumVPN.exe,SerpiumUpdater.exe,*.pdb"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\bin_files\*"; Excludes: "logs\*,serpium.runtime.json,vendor_versions.json,tgws\TgWsProxy_data\*,tgws\*.log,tgws\*.tmp,lists\*-user.txt"; DestDir: "{app}\bin_files"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\bin_files\relay\*"; Excludes: "logs\*,state\*,cache\*,temp\*,tmp\*,*.log,*.tmp"; DestDir: "{app}\bin_files\relay"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\bin_files\tgws\*"; Excludes: "TgWsProxy_data\*,*.log,*.tmp"; DestDir: "{app}\bin_files\tgws"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#SourceDir}\bin_files\wfp\*"; Excludes: "logs\*,state\*,cache\*,temp\*,tmp\*,*.log,*.tmp"; DestDir: "{app}\bin_files\wfp"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Dirs]
 Name: "{app}\licenses"
 Name: "{app}\bin_files\logs"
-Name: "{app}\bin_files\lists"
 Name: "{app}\bin_files\tgws"
 Name: "{app}\bin_files\tgws\TgWsProxy_data"
 
@@ -53,38 +56,11 @@ Name: "{autodesktop}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"; Tasks: deskt
 [Run]
 Filename: "{app}\SerpiumVPN.exe"; Description: "{cm:LaunchProgram,SerpiumVPN}"; Flags: shellexec nowait postinstall skipifsilent
 [Code]
-procedure EnsureTextFile(Path: String; Content: String);
-begin
-  if not FileExists(Path) then
-  begin
-    SaveStringToFile(Path, Content, False);
-  end;
-end;
-
-procedure CurStepChanged(CurStep: TSetupStep);
-begin
-  if CurStep = ssPostInstall then
-  begin
-    EnsureTextFile(
-      ExpandConstant('{app}\bin_files\lists\list-general-user.txt'),
-      '# Never leave this file empty'#13#10'domain.example.abc'#13#10
-    );
-    EnsureTextFile(
-      ExpandConstant('{app}\bin_files\lists\list-exclude-user.txt'),
-      '# User exclusions'#13#10
-    );
-    EnsureTextFile(
-      ExpandConstant('{app}\bin_files\lists\ipset-exclude-user.txt'),
-      '# User IP exclusions'#13#10
-    );
-  end;
-end;
-
 procedure CurUninstallStepChanged(UninstallStep: TUninstallStep);
 begin
   if UninstallStep = usPostUninstall then
   begin
-    if MsgBox('Хотите удалить ваши сохраненные списки доменов, Telegram-прокси secret и кастомные настройки?', mbConfirmation, MB_YESNO) = IDNO then
+    if MsgBox('Хотите удалить секрет Telegram-прокси и сохранённые настройки?', mbConfirmation, MB_YESNO) = IDNO then
     begin
       Log('Пользователь решил сохранить свои изменения.');
     end

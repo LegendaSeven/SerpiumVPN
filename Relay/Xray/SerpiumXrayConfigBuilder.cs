@@ -27,8 +27,9 @@ public static class SerpiumXrayConfigBuilder
             ["log"] = new Dictionary<string, object?>
             {
                 ["loglevel"] = "warning",
-                ["access"] = Path.Combine(logDirectory, "xray-key-access.log"),
-                ["error"] = Path.Combine(logDirectory, "xray-key-error.log")
+                ["access"] = "none",
+                // Engine diagnostics flow through the application's redactor, not raw files.
+                ["error"] = ""
             },
             ["inbounds"] = new object[]
             {
@@ -269,7 +270,8 @@ public static class SerpiumXrayConfigBuilder
                 {
                     ["path"] = string.IsNullOrWhiteSpace(profile.Path) ? "/" : profile.Path,
                     ["host"] = profile.HostHeader,
-                    ["mode"] = string.IsNullOrWhiteSpace(profile.Mode) ? "auto" : profile.Mode
+                    ["mode"] = string.IsNullOrWhiteSpace(profile.Mode) ? "auto" : profile.Mode,
+                    ["extra"] = profile.XhttpExtra
                 };
                 break;
 

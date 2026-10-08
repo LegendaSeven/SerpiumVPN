@@ -1,7 +1,9 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO.Compression;
 using System.Security;
+using System.Security.Cryptography;
+using System.Text.Json;
 using System.Security.Principal;
 using Microsoft.Win32;
 
@@ -41,8 +43,23 @@ internal static class Program
             try
             {
                 ZipFile.ExtractToDirectory(zipPath, stagingDir, overwriteFiles: true);
+
+                WfpUpdatePackage? stagedWfp =
+                    ValidateStagedWfpPackage(stagingDir);
+
+                if (stagedWfp is not null)
+                    StopOwnedWfpUserModeProcesses(targetDir);
+
                 Log($"Copying update to {targetDir}");
                 CopyDirectory(stagingDir, targetDir);
+
+                if (stagedWfp is not null)
+                {
+                    VerifyInstalledWfpPackage(targetDir, stagedWfp);
+                    Log(
+                        $"WFP runtime update verified. ABI={stagedWfp.ProtocolAbi}; " +
+                        $"files={stagedWfp.Files.Count}.");
+                }
             }
             finally
             {
@@ -107,6 +124,240 @@ internal static class Program
         }
     }
 
+    private const string WfpRelativeRoot = @"bin_files\wfp\x64";
+    private const string WfpRuntimeManifestFileName = "WFP_RUNTIME_MANIFEST.json";
+    private const string WfpProtocolAbi = "0x00040000";
+
+    private static readonly string[] RequiredWfpFiles =
+    [
+        "Serpium.Flow.Service.exe",
+        "Serpium.Flow.Driver.sys",
+        "Serpium.Flow.Driver.inf",
+        "serpium.flow.driver.cat",
+        "BUILD_MANIFEST.json"
+    ];
+
+    private sealed record WfpFileHash(string Name, string Sha256);
+
+    private sealed record WfpUpdatePackage(
+        string ProtocolAbi,
+        IReadOnlyList<WfpFileHash> Files);
+
+    private static WfpUpdatePackage? ValidateStagedWfpPackage(string stagingDir)
+    {
+        string root = Path.Combine(stagingDir, WfpRelativeRoot);
+        string manifestPath = Path.Combine(root, WfpRuntimeManifestFileName);
+
+        if (!Directory.Exists(root) && !File.Exists(manifestPath))
+        {
+            Log("Update archive contains no WFP runtime payload.");
+            return null;
+        }
+
+        if (!Directory.Exists(root) || !File.Exists(manifestPath))
+            throw new InvalidDataException("Update archive contains a partial WFP runtime payload.");
+
+        WfpUpdatePackage package = ReadAndVerifyWfpPackage(root);
+        Log($"Staged WFP runtime verified. ABI={package.ProtocolAbi}; files={package.Files.Count}.");
+        return package;
+    }
+
+    private static void VerifyInstalledWfpPackage(
+        string targetDir,
+        WfpUpdatePackage expected)
+    {
+        string root = Path.Combine(targetDir, WfpRelativeRoot);
+        WfpUpdatePackage installed = ReadAndVerifyWfpPackage(root);
+
+        if (!string.Equals(installed.ProtocolAbi, expected.ProtocolAbi, StringComparison.Ordinal))
+            throw new InvalidDataException($"Installed WFP ABI mismatch: {installed.ProtocolAbi}.");
+
+        Dictionary<string, string> expectedHashes =
+            expected.Files.ToDictionary(
+                item => item.Name,
+                item => item.Sha256,
+                StringComparer.OrdinalIgnoreCase);
+
+        foreach (WfpFileHash file in installed.Files)
+        {
+            if (!expectedHashes.TryGetValue(file.Name, out string? expectedHash) ||
+                !string.Equals(expectedHash, file.Sha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"Installed WFP runtime does not match update payload: {file.Name}.");
+            }
+        }
+    }
+
+    private static WfpUpdatePackage ReadAndVerifyWfpPackage(string root)
+    {
+        string manifestPath = Path.Combine(root, WfpRuntimeManifestFileName);
+        if (!File.Exists(manifestPath))
+            throw new InvalidDataException($"WFP runtime manifest not found: {manifestPath}");
+
+        using FileStream stream = File.OpenRead(manifestPath);
+        using JsonDocument document = JsonDocument.Parse(stream);
+        JsonElement element = document.RootElement;
+
+        int schema =
+            element.TryGetProperty("schema", out JsonElement schemaElement) &&
+            schemaElement.TryGetInt32(out int schemaValue)
+                ? schemaValue
+                : 0;
+
+        if (schema != 1)
+            throw new InvalidDataException($"Unsupported WFP runtime manifest schema: {schema}.");
+
+        string protocolAbi =
+            element.TryGetProperty("protocolAbi", out JsonElement abiElement) &&
+            abiElement.ValueKind == JsonValueKind.String
+                ? abiElement.GetString() ?? string.Empty
+                : string.Empty;
+
+        if (!string.Equals(protocolAbi, WfpProtocolAbi, StringComparison.Ordinal))
+            throw new InvalidDataException($"Unsupported WFP runtime ABI: {protocolAbi}.");
+
+        string platform =
+            element.TryGetProperty("platform", out JsonElement platformElement) &&
+            platformElement.ValueKind == JsonValueKind.String
+                ? platformElement.GetString() ?? string.Empty
+                : string.Empty;
+
+        if (!string.Equals(platform, "x64", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidDataException($"Unsupported WFP runtime platform: {platform}.");
+
+        if (!element.TryGetProperty("files", out JsonElement filesElement) ||
+            filesElement.ValueKind != JsonValueKind.Array)
+        {
+            throw new InvalidDataException("WFP runtime manifest has no files array.");
+        }
+
+        Dictionary<string, string> hashes = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (JsonElement fileElement in filesElement.EnumerateArray())
+        {
+            string name =
+                fileElement.TryGetProperty("name", out JsonElement nameElement) &&
+                nameElement.ValueKind == JsonValueKind.String
+                    ? nameElement.GetString() ?? string.Empty
+                    : string.Empty;
+
+            string sha256 =
+                fileElement.TryGetProperty("sha256", out JsonElement hashElement) &&
+                hashElement.ValueKind == JsonValueKind.String
+                    ? hashElement.GetString() ?? string.Empty
+                    : string.Empty;
+
+            if (string.IsNullOrWhiteSpace(name) ||
+                !string.Equals(Path.GetFileName(name), name, StringComparison.Ordinal) ||
+                !IsSha256Hex(sha256))
+            {
+                throw new InvalidDataException(
+                    "WFP runtime manifest contains an invalid file entry.");
+            }
+
+            hashes[name] = sha256.ToLowerInvariant();
+        }
+
+        List<WfpFileHash> verified = new();
+
+        foreach (string required in RequiredWfpFiles)
+        {
+            if (!hashes.TryGetValue(required, out string? expectedHash))
+                throw new InvalidDataException($"WFP runtime manifest is missing {required}.");
+
+            string path = Path.Combine(root, required);
+            if (!File.Exists(path))
+                throw new InvalidDataException($"WFP runtime payload is missing {required}.");
+
+            string actual = ComputeSha256(path);
+            if (!string.Equals(actual, expectedHash, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException($"WFP runtime hash mismatch: {required}.");
+
+            verified.Add(new WfpFileHash(required, actual));
+        }
+
+        return new WfpUpdatePackage(protocolAbi, verified);
+    }
+
+    private static bool IsSha256Hex(string value)
+    {
+        if (value.Length != 64)
+            return false;
+
+        foreach (char c in value)
+        {
+            bool hex =
+                c is >= '0' and <= '9' ||
+                c is >= 'a' and <= 'f' ||
+                c is >= 'A' and <= 'F';
+
+            if (!hex)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static string ComputeSha256(string path)
+    {
+        using FileStream stream = File.OpenRead(path);
+        return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+    }
+
+    private static void StopOwnedWfpUserModeProcesses(string targetDir)
+    {
+        string ownedRoot = Path.GetFullPath(Path.Combine(targetDir, WfpRelativeRoot));
+
+        foreach (Process process in Process.GetProcessesByName("Serpium.Flow.Service"))
+        {
+            using (process)
+            {
+                try
+                {
+                    string? executablePath = process.MainModule?.FileName;
+                    if (string.IsNullOrWhiteSpace(executablePath) ||
+                        !IsPathInsideDirectory(executablePath, ownedRoot))
+                    {
+                        continue;
+                    }
+
+                    int pid = process.Id;
+                    process.Kill(entireProcessTree: true);
+
+                    if (!process.WaitForExit(10000))
+                        throw new TimeoutException($"Serpium.Flow.Service PID {pid} did not stop.");
+
+                    Log($"Stopped owned WFP user service PID {pid} before update.");
+                }
+                catch (Win32Exception ex)
+                {
+                    throw new IOException(
+                        "Could not inspect or stop owned WFP user service.",
+                        ex);
+                }
+            }
+        }
+    }
+
+    private static bool IsPathInsideDirectory(string candidatePath, string directoryPath)
+    {
+        try
+        {
+            string candidate = Path.GetFullPath(candidatePath);
+            string directory =
+                Path.TrimEndingDirectorySeparator(Path.GetFullPath(directoryPath));
+
+            return candidate.StartsWith(
+                directory + Path.DirectorySeparatorChar,
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static void CopyDirectory(string sourceDir, string targetDir)
     {
         foreach (string sourcePath in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
@@ -150,12 +401,6 @@ internal static class Program
             }
         }
 
-        if (IsSkippableLockedFile(targetPath))
-        {
-            Log($"Locked WinDivert runtime file skipped: {targetPath}");
-            return;
-        }
-
         throw new IOException($"Failed to replace file after retries: {targetPath}", last);
     }
 
@@ -179,16 +424,6 @@ internal static class Program
         return sourceHash.AsSpan().SequenceEqual(targetHash);
     }
 
-    private static bool IsSkippableLockedFile(string targetPath)
-    {
-        string fileName = Path.GetFileName(targetPath);
-
-        return fileName.Equals("WinDivert64.sys", StringComparison.OrdinalIgnoreCase) ||
-               fileName.Equals("WinDivert32.sys", StringComparison.OrdinalIgnoreCase) ||
-               fileName.Equals("WinDivert.dll", StringComparison.OrdinalIgnoreCase) ||
-               fileName.Equals("WinDivert64.dll", StringComparison.OrdinalIgnoreCase) ||
-               fileName.Equals("WinDivert32.dll", StringComparison.OrdinalIgnoreCase);
-    }
 
     private static bool ShouldSkip(string relativePath)
     {
@@ -196,8 +431,7 @@ internal static class Program
         return normalized.StartsWith("bin_files/logs/", StringComparison.OrdinalIgnoreCase) ||
                normalized.StartsWith("bin_files/tgws/TgWsProxy_data/", StringComparison.OrdinalIgnoreCase) ||
                normalized.Equals("bin_files/serpium.runtime.json", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("bin_files/vendor_versions.json", StringComparison.OrdinalIgnoreCase) ||
-               normalized.EndsWith("-user.txt", StringComparison.OrdinalIgnoreCase);
+               normalized.Equals("bin_files/vendor_versions.json", StringComparison.OrdinalIgnoreCase);
     }
 
     private const string UninstallRegistryPath =
