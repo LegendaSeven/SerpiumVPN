@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Diagnostics;
 using System.IO;
 using System.Security.AccessControl;
@@ -6,7 +6,6 @@ using System.Security.Principal;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
-using SerpiumVPN.Core;
 
 namespace SerpiumVPN
 {
@@ -22,10 +21,7 @@ namespace SerpiumVPN
         private EventWaitHandle? _showWindowEvent;
         private CancellationTokenSource? _shutdownCts;
         private bool _ownsSingleInstanceMutex;
-
-        private PlatformRuntime? _platformRuntime;
-        private PlatformFileLogger? _platformLogger;
-        private Task? _platformStartupTask;
+        private Task? _showWindowListener;
 
         protected override void OnStartup(StartupEventArgs e)
         {
@@ -45,7 +41,7 @@ namespace SerpiumVPN
             _showWindowEvent = CreateShowWindowEvent();
             StartShowWindowListener(_shutdownCts.Token);
 
-            InitializePlatformRuntime(_shutdownCts.Token);
+            AppIdentity.Initialize();
 
             MainWindow mainWindow = new MainWindow();
             MainWindow = mainWindow;
@@ -56,13 +52,8 @@ namespace SerpiumVPN
         {
             _shutdownCts?.Cancel();
             _showWindowEvent?.Set();
-
-            WaitForPlatformStartup();
-            StopPlatformRuntimeSafely();
-
-            // Final safety net for embedded Relay processes.
-            StopEmbeddedRelayProcesses();
-
+            // The listener never awaits the UI; let it observe cancellation before closing its handle.
+            _showWindowListener?.GetAwaiter().GetResult();
             _showWindowEvent?.Dispose();
 
             if (_ownsSingleInstanceMutex)
@@ -87,155 +78,12 @@ namespace SerpiumVPN
             base.OnExit(e);
         }
 
-        private void InitializePlatformRuntime(CancellationToken cancellationToken)
-        {
-            try
-            {
-                _platformLogger = PlatformFileLogger.CreateDefault();
-                _platformLogger.Write("[App] SerpiumVPN process started.");
-
-                _platformRuntime = PlatformBootstrap.Create(
-                    log: _platformLogger.Write);
-
-                PlatformRuntimeHost.Attach(_platformRuntime);
-
-                _platformStartupTask = StartPlatformRuntimeAsync(
-                    _platformRuntime,
-                    cancellationToken);
-            }
-            catch (Exception exception)
-            {
-                WritePlatformLog(
-                    $"[App] Runtime bootstrap failed: {exception.GetType().Name}: {exception.Message}");
-            }
-        }
-
-        private async Task StartPlatformRuntimeAsync(
-            PlatformRuntime runtime,
-            CancellationToken cancellationToken)
-        {
-            try
-            {
-                PlatformRuntimeStartResult result = await runtime
-                    .StartAsync(cancellationToken)
-                    .ConfigureAwait(false);
-
-                WritePlatformLog(
-                    $"[App] Runtime startup result: State={result.State}; " +
-                    $"Components={result.Components.Loaded}/{result.Components.Found}; " +
-                    $"EnginePackages={result.DynamicEngines.Loaded}/{result.DynamicEngines.Found}; " +
-                    $"Failures={result.DynamicEngines.Failed}.");
-            }
-            catch (OperationCanceledException)
-            {
-                WritePlatformLog("[App] Runtime startup was cancelled during application shutdown.");
-            }
-            catch (Exception exception)
-            {
-                // Runtime activation must not prevent the WPF shell from opening.
-                WritePlatformLog(
-                    $"[App] Runtime startup failed: {exception.GetType().Name}: {exception.Message}");
-            }
-        }
-
-        private void WaitForPlatformStartup()
-        {
-            Task? startupTask = _platformStartupTask;
-            _platformStartupTask = null;
-
-            if (startupTask is null)
-                return;
-
-            try
-            {
-                startupTask.GetAwaiter().GetResult();
-            }
-            catch (Exception exception)
-            {
-                WritePlatformLog(
-                    $"[App] Runtime startup wait failed: {exception.GetType().Name}: {exception.Message}");
-            }
-        }
-
-        private void StopPlatformRuntimeSafely()
-        {
-            PlatformRuntime? runtime = _platformRuntime;
-            _platformRuntime = null;
-
-            if (runtime is null)
-                return;
-
-            try
-            {
-                runtime.StopAsync().GetAwaiter().GetResult();
-            }
-            catch (Exception exception)
-            {
-                WritePlatformLog(
-                    $"[App] Runtime shutdown failed: {exception.GetType().Name}: {exception.Message}");
-            }
-
-            try
-            {
-                runtime.DisposeAsync().AsTask().GetAwaiter().GetResult();
-            }
-            catch (Exception exception)
-            {
-                WritePlatformLog(
-                    $"[App] Runtime dispose failed: {exception.GetType().Name}: {exception.Message}");
-            }
-            finally
-            {
-                PlatformRuntimeHost.Detach(runtime);
-            }
-
-            WritePlatformLog("[App] SerpiumVPN process is exiting.");
-        }
-
-        private void WritePlatformLog(string message)
-        {
-            _platformLogger?.Write(message);
-        }
-
-        private static void StopEmbeddedRelayProcesses()
-        {
-            string relayDirectoryName = Path.Combine("bin_files", "relay");
-
-            foreach (Process process in Process.GetProcessesByName("xray"))
-            {
-                try
-                {
-                    string? executablePath = process.MainModule?.FileName;
-                    if (string.IsNullOrWhiteSpace(executablePath))
-                        continue;
-
-                    if (!executablePath.Contains(
-                            relayDirectoryName,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        continue;
-                    }
-
-                    process.Kill(entireProcessTree: true);
-                    process.WaitForExit(3000);
-                }
-                catch
-                {
-                    // Relay cleanup must never block application shutdown.
-                }
-                finally
-                {
-                    process.Dispose();
-                }
-            }
-        }
-
         private void StartShowWindowListener(CancellationToken cancellationToken)
         {
             if (_showWindowEvent == null)
                 return;
 
-            Task.Run(() =>
+            _showWindowListener = Task.Run(() =>
             {
                 while (!cancellationToken.IsCancellationRequested)
                 {
@@ -249,7 +97,7 @@ namespace SerpiumVPN
                             mainWindow.ShowFromTray();
                     });
                 }
-            }, cancellationToken);
+            });
         }
 
         private static Mutex CreateSingleInstanceMutex(out bool createdNew)

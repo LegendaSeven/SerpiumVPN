@@ -1,9 +1,9 @@
-﻿; Full SerpiumVPN installer. Inno owns the primary installation.
+; Full SerpiumVPN installer. Inno owns the primary installation.
 ; In-app patches are applied later by SerpiumUpdater.exe from GitHub Releases.
 
 #define MyAppName "SerpiumVPN"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.56.6"
+#define MyAppVersion "1.0.56.8"
 #endif
 #define MyAppPublisher "Serpium"
 #define ProjectRoot AddBackslash(SourcePath) + ".."
@@ -24,8 +24,11 @@ OutputBaseFilename=SerpiumVPN_Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
-SetupIconFile={#ProjectRoot}\serpium_vpn.ico
-UninstallDisplayIcon={app}\SerpiumVPN.exe
+SetupIconFile={#ProjectRoot}\Assets\Serpium.App.ico
+UninstallDisplayIcon={app}\Assets\Serpium.App.ico
+CloseApplications=yes
+CloseApplicationsFilter=SerpiumVPN.exe,SerpiumUpdater.exe
+RestartApplications=no
 
 [Languages]
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
@@ -38,36 +41,17 @@ Source: "{#SourceDir}\SerpiumVPN.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\SerpiumUpdater.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\*"; Excludes: "bin_files,SerpiumVPN.exe,SerpiumUpdater.exe,*.pdb"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\bin_files\relay\*"; Excludes: "logs\*,state\*,cache\*,temp\*,tmp\*,*.log,*.tmp"; DestDir: "{app}\bin_files\relay"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\bin_files\tgws\*"; Excludes: "TgWsProxy_data\*,*.log,*.tmp"; DestDir: "{app}\bin_files\tgws"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "{#SourceDir}\bin_files\wfp\*"; Excludes: "logs\*,state\*,cache\*,temp\*,tmp\*,*.log,*.tmp"; DestDir: "{app}\bin_files\wfp"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\THIRD_PARTY_NOTICES.txt"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "{#SourceDir}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 [Dirs]
 Name: "{app}\licenses"
 Name: "{app}\bin_files\logs"
-Name: "{app}\bin_files\tgws"
-Name: "{app}\bin_files\tgws\TgWsProxy_data"
 
 [Icons]
-Name: "{group}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"
-Name: "{autodesktop}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"; Tasks: desktopicon
+Name: "{group}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"; IconFilename: "{app}\Assets\Serpium.App.ico"; AppUserModelID: "SerpiumVPN.Desktop"
+Name: "{autodesktop}\SerpiumVPN"; Filename: "{app}\SerpiumVPN.exe"; IconFilename: "{app}\Assets\Serpium.App.ico"; AppUserModelID: "SerpiumVPN.Desktop"; Tasks: desktopicon
 
 [Run]
+Filename: "{app}\SerpiumUpdater.exe"; Parameters: "--cleanup-legacy true --target ""{app}"""; Flags: runhidden waituntilterminated
 Filename: "{app}\SerpiumVPN.exe"; Description: "{cm:LaunchProgram,SerpiumVPN}"; Flags: shellexec nowait postinstall skipifsilent
-[Code]
-procedure CurUninstallStepChanged(UninstallStep: TUninstallStep);
-begin
-  if UninstallStep = usPostUninstall then
-  begin
-    if MsgBox('Хотите удалить секрет Telegram-прокси и сохранённые настройки?', mbConfirmation, MB_YESNO) = IDNO then
-    begin
-      Log('Пользователь решил сохранить свои изменения.');
-    end
-    else
-    begin
-      DelTree(ExpandConstant('{app}\bin_files'), True, True, True);
-      RemoveDir(ExpandConstant('{app}'));
-    end;
-  end;
-end;

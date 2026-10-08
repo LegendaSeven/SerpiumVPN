@@ -7,6 +7,7 @@ public partial class MainWindow
 {
     private readonly DispatcherTimer _componentUpdateTimer = new(){Interval=TimeSpan.FromHours(1)};
     private bool _componentCheckBusy;
+    private TaskCompletionSource? _componentCheckCompletion;
     private bool _componentInstallBusy;
     private bool _componentUpdatesAvailable;
     private string _componentUpdateMessage="sing-box и Xray · проверка обновлений";
@@ -26,6 +27,7 @@ public partial class MainWindow
     private async Task CheckSimpleComponentUpdatesAsync(bool force)
     {
         if(_componentCheckBusy||_componentInstallBusy||_simpleLifetime.IsCancellationRequested)return;
+        _componentCheckCompletion=new(TaskCreationOptions.RunContinuationsAsynchronously);
         _componentCheckBusy=true;_componentUpdateMessage="Проверяем обновления компонентов…";RenderSimpleComponentUpdates();
         try
         {
@@ -50,7 +52,13 @@ public partial class MainWindow
         }
         catch(OperationCanceledException) when(_simpleLifetime.IsCancellationRequested){}
         catch(Exception error){LogSimpleFailure(error);_componentUpdatesAvailable=false;_componentUpdateMessage="Не удалось проверить обновления. Повторите позже.";}
-        finally{_componentCheckBusy=false;if(!_simpleLifetime.IsCancellationRequested)RenderSimpleComponentUpdates();}
+        finally
+        {
+            _componentCheckBusy=false;
+            _componentCheckCompletion.TrySetResult();
+            _componentCheckCompletion=null;
+            if(!_simpleLifetime.IsCancellationRequested)RenderSimpleComponentUpdates();
+        }
     }
 
     private async void SimpleComponentUpdatesRequested(object? sender,EventArgs args)

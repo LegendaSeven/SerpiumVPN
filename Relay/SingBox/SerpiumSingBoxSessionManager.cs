@@ -52,7 +52,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     private static readonly TimeSpan InterfaceStartTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan ConnectivityTimeout = TimeSpan.FromSeconds(35);
     private static readonly TimeSpan InterfaceStopTimeout = TimeSpan.FromSeconds(30);
-    private static readonly TimeSpan ProxyStartTimeout = TimeSpan.FromSeconds(12);
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
     private const int JobObjectExtendedLimitInformationClass = 9;
     private static readonly Uri ConnectivityProbeUri =
@@ -102,8 +101,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     private Process? _process;
     private SafeFileHandle? _killOnCloseJob;
     private string? _interfaceName;
-    private int? _socksPort;
-    private bool _proxyBackendMode;
     private readonly object _flowObservationGate = new();
     private readonly Dictionary<string, string> _flowProcessPaths =
         new(StringComparer.Ordinal);
@@ -136,8 +133,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     public bool IsRunning => _process is { HasExited: false };
     public string? LastError { get; private set; }
     public string? InterfaceName => _interfaceName;
-    public int? SocksPort => _socksPort;
-    public bool IsProxyBackendMode => _proxyBackendMode;
     public int? ProcessId => _process is { HasExited: false } ? _process.Id : null;
 
     public bool HasLiveProcess
@@ -192,8 +187,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
         byte[] configurationUtf8 = runtimeProfile.CopyConfiguration();
         string? interfaceName = null;
-        _proxyBackendMode = false;
-        _socksPort = null;
         _clashApiPort = runtimeProfile.ClashApiPort;
         _clashApiSecret = runtimeProfile.ClashApiSecret;
         _connectivityProbeOutboundTag = null;
@@ -303,146 +296,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     }
 
 
-    /// <summary>
-    /// Starts sing-box as a loopback SOCKS5 provider backend for Serpium WFP.
-    /// This mode does not create a TUN adapter and does not modify system routes.
-    /// The caller must pass this process PID to the WFP bridge bypass list.
-    /// </summary>
-    public async Task StartProxyAsync(
-        string singBoxExecutablePath,
-        ProviderRuntimeProfile runtimeProfile,
-        int socksPort,
-        CancellationToken cancellationToken = default)
-    {
-        ObjectDisposedException.ThrowIf(_disposed, this);
-        ArgumentNullException.ThrowIfNull(runtimeProfile);
-
-        if (HasLiveProcess)
-            throw new InvalidOperationException("sing-box transport уже запущен.");
-        if (socksPort is < 1 or > 65535)
-            throw new ArgumentOutOfRangeException(nameof(socksPort));
-
-        string executablePath = Path.GetFullPath(singBoxExecutablePath);
-        if (!File.Exists(executablePath))
-        {
-            throw new FileNotFoundException(
-                "sing-box.exe не найден в bin_files\\relay.",
-                executablePath);
-        }
-
-        byte[] configurationUtf8 = runtimeProfile.CopyConfiguration();
-        _interfaceName = null;
-        _proxyBackendMode = true;
-        _socksPort = socksPort;
-        _clashApiPort = 0;
-        _clashApiSecret = string.Empty;
-        StopActiveConnectionMonitor();
-        SetState(RelayGatewayState.Starting);
-        LastError = null;
-
-        try
-        {
-            ReadAndValidateLoopbackSocksInbound(
-                configurationUtf8,
-                socksPort);
-            ClearFlowObservations();
-
-            Directory.CreateDirectory(Path.GetDirectoryName(_statePath)!);
-            await StopStoredOwnedProcessAsync(cancellationToken);
-
-            ProcessStartInfo startInfo = new()
-            {
-                FileName = executablePath,
-                WorkingDirectory =
-                    Path.GetDirectoryName(executablePath) ?? _relayDirectory,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardInput = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8
-            };
-            startInfo.ArgumentList.Add("run");
-            startInfo.ArgumentList.Add("--disable-color");
-            startInfo.ArgumentList.Add("-c");
-            startInfo.ArgumentList.Add("stdin");
-
-            _process = new Process
-            {
-                StartInfo = startInfo,
-                EnableRaisingEvents = true
-            };
-            _process.OutputDataReceived += (_, eventArgs) =>
-                ForwardLog(eventArgs.Data);
-            _process.ErrorDataReceived += (_, eventArgs) =>
-                ForwardLog(eventArgs.Data);
-            _process.Exited += (_, _) => HandleUnexpectedExit();
-
-            if (!_process.Start())
-                throw new InvalidOperationException(
-                    "Не удалось запустить sing-box WFP backend.");
-
-            AttachProcessToKillOnCloseJob(_process);
-            SaveState(_process, executablePath, string.Empty);
-            _process.BeginOutputReadLine();
-            _process.BeginErrorReadLine();
-
-            try
-            {
-                await _process.StandardInput.BaseStream.WriteAsync(
-                    configurationUtf8.AsMemory(),
-                    cancellationToken);
-                await _process.StandardInput.BaseStream.FlushAsync(
-                    cancellationToken);
-            }
-            finally
-            {
-                _process.StandardInput.Close();
-            }
-
-            await WaitForLoopbackSocksAsync(
-                socksPort,
-                ProxyStartTimeout,
-                cancellationToken);
-
-            ThrowIfProcessExited(
-                "sing-box WFP backend завершился до READY");
-
-            LogReceived?.Invoke(
-                $"WFP backend SOCKS5 готов: 127.0.0.1:{socksPort}");
-            SetState(RelayGatewayState.Running);
-        }
-        catch (Exception ex)
-        {
-            LastError = ex.Message;
-            await KillCurrentProcessAsync(CancellationToken.None);
-            DeleteStateFile();
-            _socksPort = null;
-            _proxyBackendMode = false;
-            SetState(RelayGatewayState.Failed);
-            throw;
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(configurationUtf8);
-        }
-    }
-
-    public static int FindAvailableLoopbackPort()
-    {
-        TcpListener listener = new(IPAddress.Loopback, 0);
-        try
-        {
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
-        finally
-        {
-            listener.Stop();
-        }
-    }
-
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -483,8 +336,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
             }
 
             _interfaceName = null;
-            _socksPort = null;
-            _proxyBackendMode = false;
             _clashApiPort = 0;
             _clashApiSecret = string.Empty;
             ClearFlowObservations();
@@ -492,116 +343,6 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         }
     }
 
-
-    private static void ReadAndValidateLoopbackSocksInbound(
-        byte[] configurationUtf8,
-        int expectedPort)
-    {
-        using JsonDocument document = JsonDocument.Parse(configurationUtf8);
-        JsonElement root = document.RootElement;
-        if (!root.TryGetProperty("inbounds", out JsonElement inbounds) ||
-            inbounds.ValueKind != JsonValueKind.Array)
-        {
-            throw new FormatException(
-                "WFP backend configuration не содержит inbounds.");
-        }
-
-        foreach (JsonElement inbound in inbounds.EnumerateArray())
-        {
-            if (inbound.ValueKind != JsonValueKind.Object ||
-                !inbound.TryGetProperty("type", out JsonElement typeValue) ||
-                typeValue.ValueKind != JsonValueKind.String ||
-                !string.Equals(
-                    typeValue.GetString(),
-                    "socks",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-
-            string listen = inbound.TryGetProperty(
-                    "listen",
-                    out JsonElement listenValue) &&
-                listenValue.ValueKind == JsonValueKind.String
-                    ? listenValue.GetString() ?? string.Empty
-                    : string.Empty;
-
-            int port = inbound.TryGetProperty(
-                    "listen_port",
-                    out JsonElement portValue) &&
-                portValue.TryGetInt32(out int parsedPort)
-                    ? parsedPort
-                    : 0;
-
-            if (!string.Equals(
-                    listen,
-                    "127.0.0.1",
-                    StringComparison.OrdinalIgnoreCase))
-            {
-                throw new FormatException(
-                    "WFP backend SOCKS5 обязан слушать только 127.0.0.1.");
-            }
-
-            if (port != expectedPort)
-            {
-                throw new FormatException(
-                    "WFP backend SOCKS5 использует неожиданный локальный порт.");
-            }
-
-            return;
-        }
-
-        throw new FormatException(
-            "В WFP backend configuration не найден loopback SOCKS5 inbound.");
-    }
-
-    private async Task WaitForLoopbackSocksAsync(
-        int socksPort,
-        TimeSpan timeout,
-        CancellationToken cancellationToken)
-    {
-        DateTime deadline = DateTime.UtcNow + timeout;
-        string lastFailure = "порт ещё не отвечает";
-
-        while (DateTime.UtcNow < deadline)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            ThrowIfProcessExited(
-                "sing-box WFP backend завершился до открытия SOCKS5");
-
-            using TcpClient client = new(AddressFamily.InterNetwork);
-            using CancellationTokenSource attempt =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    cancellationToken);
-            attempt.CancelAfter(TimeSpan.FromMilliseconds(650));
-
-            try
-            {
-                await client.ConnectAsync(
-                    IPAddress.Loopback,
-                    socksPort,
-                    attempt.Token);
-                return;
-            }
-            catch (OperationCanceledException)
-                when (!cancellationToken.IsCancellationRequested)
-            {
-                lastFailure = "таймаут подключения к loopback SOCKS5";
-            }
-            catch (SocketException ex)
-            {
-                lastFailure = ex.SocketErrorCode.ToString();
-            }
-
-            await Task.Delay(
-                TimeSpan.FromMilliseconds(120),
-                cancellationToken);
-        }
-
-        throw new TimeoutException(
-            $"sing-box не открыл WFP backend SOCKS5 127.0.0.1:{socksPort} " +
-            $"за {timeout.TotalSeconds:0} секунд: {lastFailure}.");
-    }
 
     private static string ReadAndValidateTunInterface(byte[] configurationUtf8)
     {
@@ -1004,7 +745,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
 
     public async Task WaitForRoutingPolicyAsync(string activationProbe, CancellationToken cancellationToken = default)
     {
-        if (_proxyBackendMode || !IsRunning)
+        if (!IsRunning)
             throw new InvalidOperationException("Live TUN routing is unavailable.");
         var client = new SfpLiveRoutingClient(_clashApiClient, _clashApiPort, _clashApiSecret);
         await client.WaitForPolicyAsync(activationProbe, cancellationToken);
@@ -1013,7 +754,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
     public async Task<int> ApplySfpLivePolicyAsync(string activationProbe, IEnumerable<string> processPaths,
         bool desiredVpn, CancellationToken cancellationToken = default)
     {
-        if (_proxyBackendMode || !IsRunning)
+        if (!IsRunning)
             throw new InvalidOperationException("Live TUN routing is unavailable.");
         int? processId = ProcessId;
         var client = new SfpLiveRoutingClient(_clashApiClient, _clashApiPort, _clashApiSecret);
@@ -1031,8 +772,7 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         SingBoxObservedRoute desiredRoute,
         CancellationToken cancellationToken = default)
     {
-        if (_proxyBackendMode ||
-            _clashApiPort is < 1 or > 65535 ||
+        if (_clashApiPort is < 1 or > 65535 ||
             string.IsNullOrWhiteSpace(_clashApiSecret))
         {
             return 0;

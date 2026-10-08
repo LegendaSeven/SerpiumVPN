@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using SerpiumVPN.Relay.Routing;
 
 namespace SerpiumVPN.Relay.Lifecycle;
 
@@ -17,8 +16,7 @@ public static class RelayLifecycleRecovery
     private static readonly string[] OwnedProcessNames =
     [
         "xray",
-        "sing-box",
-        "Serpium.Flow.Service"
+        "sing-box"
     ];
 
     private static readonly string[] GeneratedRuntimeFiles =
@@ -54,15 +52,7 @@ public static class RelayLifecycleRecovery
                         IsInsideDirectory(
                             executablePath,
                             relayDirectory);
-                    bool wfpOwned =
-                        string.Equals(
-                            processName,
-                            "Serpium.Flow.Service",
-                            StringComparison.OrdinalIgnoreCase) &&
-                        WfpRuntimeOwner.IsOwnedExecutablePath(
-                            executablePath);
-
-                    if (!relayOwned && !wfpOwned)
+                    if (!relayOwned)
                         continue;
 
                     try
@@ -88,7 +78,6 @@ public static class RelayLifecycleRecovery
 
         int filesDeleted = DeleteGeneratedSecrets(applicationBaseDirectory);
         filesDeleted += await DeletePrivateRuntimeResidueWithRetryAsync(cancellationToken).ConfigureAwait(false);
-        filesDeleted += WfpRuntimeOwner.CleanupEphemeralState();
         return new RelayLifecycleCleanupResult(processesStopped, filesDeleted);
     }
 

@@ -1,6 +1,5 @@
 using System.IO;
 using System.Windows;
-using System.Windows.Controls.Primitives;
 using System.Windows.Threading;
 using SerpiumVPN.Relay;
 using SerpiumVPN.Relay.Diagnostics;
@@ -14,21 +13,20 @@ namespace SerpiumVPN;
 
 public partial class MainWindow
 {
-    // The new screen uses the existing TUN transport; experimental kernel work is separate.
-    private static bool UseExperimentalWfpRouting => false;
     private readonly InstalledApplicationDiscovery _simpleDiscovery = new();
     private readonly CancellationTokenSource _simpleLifetime = new();
     private CancellationTokenSource? _simpleConnectCancellation;
     private readonly DispatcherTimer _simpleDiscoveryTimer = new() { Interval = TimeSpan.FromSeconds(5) };
     private IReadOnlyList<DiscoveredApplication> _simpleApplications = Array.Empty<DiscoveredApplication>();
     private bool _simpleDiscoveryBusy;
+    private TaskCompletionSource? _simpleDiscoveryCompletion;
     private bool _simpleBusy;
     private bool _simpleReady;
     private string? _simpleActivity;
     private Guid? _simpleProfileId;
     private int _simpleMessageVersion;
     private bool _simpleWasConnected;
-    private SerpiumVPN.Core.PlatformFileLogger? _simpleConnectionLog;
+    private ConnectionFileLogger? _simpleConnectionLog;
     private readonly ProfileSelectionStore _simpleProfileSelection = new();
 
     private bool SimpleConnected => _activeSavedProfileId.HasValue &&
@@ -130,6 +128,7 @@ public partial class MainWindow
     {
         if (_simpleDiscoveryBusy || _simpleBusy || _simpleLifetime.IsCancellationRequested) return;
         _simpleDiscoveryBusy = true;
+        _simpleDiscoveryCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
         try
         {
             var discovered = await _simpleDiscovery.DiscoverAsync(_simpleLifetime.Token);
@@ -143,7 +142,12 @@ public partial class MainWindow
             LogSimpleFailure(error);
             SimpleHome.UpdateEmptyState("Не удалось получить список приложений. Повторим автоматически.");
         }
-        finally { _simpleDiscoveryBusy = false; }
+        finally
+        {
+            _simpleDiscoveryBusy = false;
+            _simpleDiscoveryCompletion.TrySetResult();
+            _simpleDiscoveryCompletion = null;
+        }
     }
 
     private void RenderSimpleApplications()
@@ -175,6 +179,13 @@ public partial class MainWindow
 
     private void SetSimpleBusy(bool busy, string? activity = null)
     {
+        if (busy && !_simpleBusy)
+            _activeOperationCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!busy)
+        {
+            _activeOperationCompletion?.TrySetResult();
+            _activeOperationCompletion = null;
+        }
         _simpleBusy = busy;
         _simpleActivity = activity;
         _simpleMessageVersion++;
@@ -237,12 +248,8 @@ public partial class MainWindow
         {
             await StopSimpleTransportsSafelyAsync();
             _activeSavedProfileId = null;
-            _activeSavedProfileSocksPort = null;
-            _currentProviderProfileSaved = false;
             _validatedRelayProfile = null;
             DisposeValidatedProviderRuntimeProfile();
-            ClearActiveRoutingSnapshot();
-            ClearSavedProfileFailure();
             _simpleWasConnected = false;
             try
             {
@@ -251,7 +258,7 @@ public partial class MainWindow
                 RenderSimpleProfiles();
             }
             catch (Exception error) { LogSimpleFailure(error); }
-            bool stopped = !_serpiumSingBoxSessionManager.HasLiveProcess && !_serpiumXraySessionManager.HasLiveProcess && !_wfpRoutingController.IsBridgeRunning;
+            bool stopped = !_serpiumSingBoxSessionManager.HasLiveProcess && !_serpiumXraySessionManager.HasLiveProcess;
             if (!stopped) _simpleReady = false;
             SimpleHome.SetMessage(stopped && _simpleReady ? "Подключение остановлено." : "Не удалось полностью остановить подключение. Перезапустите приложение.", !stopped || !_simpleReady);
         }
@@ -311,9 +318,7 @@ public partial class MainWindow
 
     private async Task StartSimpleSavedProfileAsync(Guid id, CancellationToken cancellationToken)
     {
-        // Await the same connection operation as the original profile screen.
-        _savedProfileInputBlockedUntil = DateTimeOffset.MinValue;
-        await ConnectSavedProfileAsync(new ToggleButton { Tag = id }, propagateFailure: true, cancellationToken: cancellationToken);
+        await ConnectSavedProfileAsync(id, cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         if (!SimpleConnected || _activeSavedProfileId != id)
             throw new ConnectionCheckException(ConnectionFailureKind.ProbeFailed);
@@ -398,7 +403,6 @@ public partial class MainWindow
         await _serpiumSingBoxSessionManager.ApplySfpLivePolicyAsync(update.ActivationProbe, paths, enabled, _simpleLifetime.Token);
         if (!SimpleConnected || _activeSavedProfileId != profileId)
             throw new InvalidOperationException("The connection ended during the application switch.");
-        CaptureActiveRoutingSnapshot(_routingRegistryEntries);
     }
 
     private async void ShowSimpleConfirmation(string message)
@@ -413,7 +417,6 @@ public partial class MainWindow
     private void LogSimpleFailure(Exception error)
     {
         string message = "Simple UI: " + SensitiveDiagnosticRedactor.RedactText(error.Message);
-        RelayClientLogTextBox.AppendText(message + Environment.NewLine);
         _simpleConnectionLog?.Write(message);
     }
 

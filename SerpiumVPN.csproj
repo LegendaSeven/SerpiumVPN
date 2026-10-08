@@ -1,102 +1,26 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
-
-	<PropertyGroup>
-		<OutputType>WinExe</OutputType>
-		<TargetFramework>net10.0-windows</TargetFramework>
-		<Nullable>enable</Nullable>
-		<ImplicitUsings>enable</ImplicitUsings>
-		<UseWPF>true</UseWPF>
-		<UseWindowsForms>true</UseWindowsForms>
-		<ApplicationManifest>app.manifest</ApplicationManifest>
-		<ApplicationIcon>serpium_vpn.ico</ApplicationIcon>
-		<AssemblyVersion>1.0.56.6</AssemblyVersion>
-		<FileVersion>1.0.56.6</FileVersion>
-		<Version>1.0.56.6</Version>
-		<VersionPrefix>1.0.56.6</VersionPrefix>
-		<VersionSuffix></VersionSuffix>
-		<InformationalVersion>1.0.56.6</InformationalVersion>
-		<BuildSampleEngine Condition="'$(BuildSampleEngine)' == ''">true</BuildSampleEngine>
-	</PropertyGroup>
-
-	<ItemGroup>
-		<None Remove="serpium_vpn.ico" />
-		<None Remove="Assets\Serpium.png" />
-		<!-- Native components and their packaged client sources are built separately. -->
-		<Compile Remove="Native\**\*.cs" />
-		<Compile Remove="SerpiumUpdater\**\*.cs" />
-		<None Remove="SerpiumUpdater\**\*" />
-		<Compile Remove="Engines\SampleEngine\Source\**\*.cs" />
-		<None Remove="Engines\SampleEngine\Source\**\*" />
-		<None Remove="Engines\SampleEngine\Build\**\*" />
-		<Compile Remove="SDK\**\*.cs" />
-		<EmbeddedResource Remove="SDK\**\*" />
-		<None Remove="SDK\**\*" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<Resource Include="serpium_vpn.ico" />
-		<Resource Include="Assets\Serpium.png" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<ProjectReference Include="SDK\Serpium.Engine.Abstractions\Serpium.Engine.Abstractions.csproj" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<None Update="bin_files\relay\**\*;bin_files\tgws\**\*;bin_files\wfp\**\*">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-		</None>
-		<None Update="Engines\**\*">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-		</None>
-		<None Update=".github\workflows\release.yml" Link="GitHub Actions\release.yml" />
-	</ItemGroup>
-
-	<ItemGroup>
-		<None Update="THIRD_PARTY_NOTICES.txt">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-		</None>
-		<None Update="licenses\**\*">
-			<CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-			<CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-		</None>
-	</ItemGroup>
-
-	<Target Name="BuildSampleEnginePackage"
-			AfterTargets="Build"
-			Condition="'$(BuildSampleEngine)' == 'true'">
-		<PropertyGroup>
-			<_SampleEngineProject>$(MSBuildProjectDirectory)\Engines\SampleEngine\Source\Serpium.SampleEngine.csproj</_SampleEngineProject>
-			<_SampleEngineOutput>$(MSBuildProjectDirectory)\Engines\SampleEngine\Build\</_SampleEngineOutput>
-			<_SampleEnginePackage>$(TargetDir)Engines\SampleEngine\</_SampleEnginePackage>
-		</PropertyGroup>
-
-		<MSBuild Projects="$(_SampleEngineProject)"
-				 Targets="Restore;Build"
-				 Properties="Configuration=$(Configuration)" />
-
-		<MakeDir Directories="$(_SampleEnginePackage)" />
-
-		<Copy SourceFiles="$(_SampleEngineOutput)Serpium.SampleEngine.dll"
-			  DestinationFolder="$(_SampleEnginePackage)"
-			  SkipUnchangedFiles="true" />
-
-		<Copy SourceFiles="$(MSBuildProjectDirectory)\Engines\SampleEngine\manifest.json"
-			  DestinationFolder="$(_SampleEnginePackage)"
-			  SkipUnchangedFiles="true" />
-	</Target>
-
-  <Target Name="IncludeSampleEngineInPublish"
-          AfterTargets="ComputeFilesToPublish"
-          Condition="'$(BuildSampleEngine)' == 'true'">
-    <ItemGroup>
-      <ResolvedFileToPublish Include="$(MSBuildProjectDirectory)\Engines\SampleEngine\Build\Serpium.SampleEngine.dll">
-        <RelativePath>Engines\SampleEngine\Serpium.SampleEngine.dll</RelativePath>
-        <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
-      </ResolvedFileToPublish>
-    </ItemGroup>
-  </Target>
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Serpium.App.ico</ApplicationIcon>
+    <AssemblyVersion>1.0.56.8</AssemblyVersion>
+    <FileVersion>1.0.56.8</FileVersion>
+    <Version>1.0.56.8</Version>
+    <VersionPrefix>1.0.56.8</VersionPrefix>
+    <InformationalVersion>1.0.56.8</InformationalVersion>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Remove="SerpiumUpdater\**\*.cs" />
+    <None Remove="SerpiumUpdater\**\*;Assets\Serpium.App.ico;Assets\Serpium.png" />
+    <Resource Include="Assets\Serpium.App.ico;Assets\Serpium.png" />
+    <!-- Keep the shortcut's file copy without registering this resource as WPF Content. -->
+    <None Include="Assets\Serpium.App.ico" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <!-- Only the two supported transports belong in the application package. -->
+    <None Update="bin_files\relay\sing-box.exe;bin_files\relay\xray.exe;bin_files\relay\sing-box.version.txt;bin_files\relay\xray.version.json;bin_files\relay\README_XRAY.txt;THIRD_PARTY_NOTICES.txt;licenses\*" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

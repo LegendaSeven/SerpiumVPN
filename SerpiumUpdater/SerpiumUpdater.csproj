@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
 	<PropertyGroup>
 		<OutputType>Exe</OutputType>
@@ -6,12 +6,12 @@
 		<Nullable>enable</Nullable>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<AssemblyName>SerpiumUpdater</AssemblyName>
-		<AssemblyVersion>1.0.56.6</AssemblyVersion>
-		<FileVersion>1.0.56.6</FileVersion>
-		<Version>1.0.56.6</Version>
-		<VersionPrefix>1.0.56.6</VersionPrefix>
+		<AssemblyVersion>1.0.56.8</AssemblyVersion>
+		<FileVersion>1.0.56.8</FileVersion>
+		<Version>1.0.56.8</Version>
+		<VersionPrefix>1.0.56.8</VersionPrefix>
 		<VersionSuffix></VersionSuffix>
-		<InformationalVersion>1.0.56.6</InformationalVersion>
+		<InformationalVersion>1.0.56.8</InformationalVersion>
 	</PropertyGroup>
 
 </Project>

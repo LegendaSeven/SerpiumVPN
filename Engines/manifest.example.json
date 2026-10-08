@@ -1,8 +1,0 @@
-{
-  "schemaVersion": 1,
-  "id": "sample-engine",
-  "apiVersion": 1,
-  "assembly": "SampleEngine.dll",
-  "entryType": "SampleEngine.SampleEngine",
-  "enabled": true
-}

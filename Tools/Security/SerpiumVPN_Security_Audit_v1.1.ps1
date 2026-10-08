@@ -1,4 +1,4 @@
-﻿#requires -version 5.1
+#requires -version 5.1
 [CmdletBinding()]
 param(
     [string]$Root
@@ -221,13 +221,13 @@ Write-Host ""
 
 # 1. Process state.
 $running = @(
-    Get-Process -Name @("SerpiumVPN", "xray", "sing-box", "SerpiumNet") `
+    Get-Process -Name @("SerpiumVPN", "xray", "sing-box") `
         -ErrorAction SilentlyContinue
 )
 
 if ($running.Count -eq 0) {
     Add-Finding "PASS" "Состояние процессов" (
-        "SerpiumVPN, Xray, sing-box и SerpiumNet остановлены. " +
+        "SerpiumVPN, Xray и sing-box остановлены. " +
         "Проверка остаточных runtime-файлов достовернее."
     )
 }

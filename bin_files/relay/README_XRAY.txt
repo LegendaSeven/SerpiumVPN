@@ -1,8 +1,1 @@
-﻿Serpium Relay Xray Gateway Core
-
-Положите официальный Windows x64 бинарник Xray сюда:
-  bin_files\relay\xray.exe
-
-После этого кнопка «Запустить шлюз» создаст:
-  bin_files\relay\configs\gateway-server.json
-и запустит Xray VLESS/TCP inbound.
+SerpiumVPN uses official Xray-core for the selected connection profile. Configurations are passed over stdin. Per-app routing uses sing-box TUN. Component updates are available from the Updates menu.

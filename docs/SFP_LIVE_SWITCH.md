@@ -1,9 +1,7 @@
 # SFP live application switching
 
 The simple home screen uses a user-mode SFP controller with the existing sing-box
-TUN engine. This path does not load `Serpium.SFP.Kernel.sys`, use the experimental
-WFP backend, or require a new custom kernel driver. The native SFP API v1 sources
-remain a separate experimental backend.
+TUN engine. The product does not include a separate native kernel backend.
 
 ## Switching sequence
 

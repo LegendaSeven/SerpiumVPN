@@ -130,18 +130,6 @@ namespace SerpiumVPN
             System.Windows.Application.Current.Shutdown();
         }
 
-        public void ApplyLocalUpdate(string archivePath)
-        {
-            if (!File.Exists(archivePath))
-                throw new FileNotFoundException(
-                    $"Архив обновления не найден: {archivePath}");
-
-            _pendingUpdate = new PendingAppUpdate(
-                "manual",
-                archivePath);
-
-            RestartAndApply();
-        }
         private async Task<GithubReleaseInfo> GetLatestReleaseAsync(CancellationToken cancellationToken)
         {
             using HttpResponseMessage response = await _httpClient.GetAsync(LatestReleaseApiUrl, cancellationToken);

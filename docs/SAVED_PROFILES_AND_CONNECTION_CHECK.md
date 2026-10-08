@@ -49,7 +49,7 @@ owning operation has unwound and completed cleanup. Active connections still
 use “Отключить”; profile deletion and live routing changes do not expose Stop.
 
 The token reaches profile import, vault reads, configuration checks and both
-engine startup paths. Cancellation cannot trigger WFP-to-TUN fallback or report
+engine startup paths. Cancellation cannot report
 a late successful connection. Cleanup runs independently of the canceled token.
 Saved profiles remain available; cancellation is not recorded as an invalid key.
 Key decoding and DPAPI/ACL work run off the UI thread to keep Stop responsive.

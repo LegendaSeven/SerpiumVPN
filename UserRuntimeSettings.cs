@@ -6,7 +6,6 @@ namespace SerpiumVPN
 {
     public sealed class UserRuntimeSettings
     {
-        public bool AutoUpdateTelegramProxy { get; set; } = true;
         public bool AutoUpdateProgram { get; set; } = true;
         public bool AutoCheckRelayComponents { get; set; } = true;
         public DateTimeOffset? LastRelayComponentCheckUtc { get; set; }
@@ -30,15 +29,6 @@ namespace SerpiumVPN
 
                 string json = File.ReadAllText(SettingsPath);
                 var settings = JsonSerializer.Deserialize<UserRuntimeSettings>(json) ?? new UserRuntimeSettings();
-                using var document = JsonDocument.Parse(json);
-                // Preserve the component update preference saved by earlier versions.
-                if (document.RootElement.ValueKind == JsonValueKind.Object &&
-                    !document.RootElement.TryGetProperty(nameof(AutoUpdateTelegramProxy), out _) &&
-                    document.RootElement.TryGetProperty("AutoUpdateFiles", out var oldPreference) &&
-                    oldPreference.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                {
-                    settings.AutoUpdateTelegramProxy = oldPreference.GetBoolean();
-                }
                 return settings;
             }
             catch

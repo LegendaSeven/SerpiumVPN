@@ -1,9 +1,0 @@
-﻿{
-  "schemaVersion": 1,
-  "id": "serpium.SerpiumNet",
-  "apiVersion": 1,
-  "version": "0.5.2",
-  "assembly": "Runtime/Serpium.SerpiumNet.Engine.dll",
-  "entryType": "Serpium.SerpiumNet.Engine.SerpiumNetEngine",
-  "enabled": true
-}
