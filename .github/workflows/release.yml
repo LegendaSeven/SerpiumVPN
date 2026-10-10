@@ -28,18 +28,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "10.0.x"
-
       - name: Resolve release version
         shell: pwsh
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
         run: |
-          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
-            $version = "${{ inputs.version }}"
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch") {
+            $version = $env:INPUT_VERSION
           } else {
-            $version = "${{ github.ref_name }}".TrimStart('v')
+            $version = $env:GITHUB_REF_NAME.TrimStart('v')
           }
 
           if ($version -notmatch '^\d+\.\d+\.\d+(\.\d+)?(-[0-9A-Za-z.-]+)?$') {
@@ -48,26 +45,56 @@ jobs:
 
           "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
-      - name: Build, pack and publish GitHub Release
+      - name: Check for an existing release
+        id: existing
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $args = @(
-            "-Version", $env:RELEASE_VERSION,
-            "-SelfContained",
-            "-PublishGitHub",
-            "-GitHubRepo", "${{ github.repository }}",
-            "-TargetCommit", "${{ github.sha }}"
-          )
-
-          if ("${{ github.event_name }}" -eq "workflow_dispatch" -and "${{ inputs.draft }}" -eq "true") {
-            $args += "-Draft"
+          $tag = "v$env:RELEASE_VERSION"
+          $headers = @{Authorization = "Bearer $env:GH_TOKEN"; Accept = "application/vnd.github+json"}
+          $existingRelease = $null
+          try {
+            $existingRelease = Invoke-RestMethod -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag" -Headers $headers
+          } catch {
+            if ([int]$_.Exception.Response.StatusCode -ne 404) { throw }
+          }
+          if ($null -ne $existingRelease) {
+            "publish_required=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+            "Release $tag already exists. Existing files are preserved." | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Encoding utf8 -Append
+          } else {
+            "publish_required=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
           }
 
-          ./release.ps1 @args
+      - name: Setup .NET
+        if: steps.existing.outputs.publish_required == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Build, pack and publish GitHub Release
+        if: steps.existing.outputs.publish_required == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_DRAFT: ${{ inputs.draft }}
+        run: |
+          $releaseParameters = @{
+            Version = $env:RELEASE_VERSION
+            SelfContained = $true
+            PublishGitHub = $true
+            GitHubRepo = $env:GITHUB_REPOSITORY
+            TargetCommit = $env:GITHUB_SHA
+          }
+
+          if ($env:GITHUB_EVENT_NAME -eq "workflow_dispatch" -and $env:INPUT_DRAFT -eq "true") {
+            $releaseParameters.Draft = $true
+          }
+
+          ./release.ps1 @releaseParameters
 
       - name: Upload workflow artifact
+        if: steps.existing.outputs.publish_required == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: SerpiumVPN-${{ env.RELEASE_VERSION }}-release
