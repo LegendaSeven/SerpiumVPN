@@ -54,6 +54,19 @@ public sealed class SfpLiveRoutingClient
     {
         var paths = new HashSet<string>(processPaths.Where(p => !string.IsNullOrWhiteSpace(p)).Select(NormalizePath), StringComparer.OrdinalIgnoreCase);
         if (paths.Count == 0) throw new ArgumentException("No application paths supplied.", nameof(processPaths));
+        return await CloseStaleConnectionsCoreAsync(metadata =>
+        {
+            if (!metadata.TryGetProperty("processPath", out var process) || process.ValueKind != JsonValueKind.String ||
+                !paths.Contains(NormalizePath(process.GetString()!))) return null;
+            return desiredVpn;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public Task<int> CloseStaleConnectionsAsync(SfpRoutingPolicy policy, CancellationToken cancellationToken = default) =>
+        CloseStaleConnectionsCoreAsync(metadata => policy.TryGetDesiredVpn(metadata, out bool vpn) ? vpn : null, cancellationToken);
+
+    private async Task<int> CloseStaleConnectionsCoreAsync(Func<JsonElement, bool?> desiredRoute, CancellationToken cancellationToken)
+    {
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(5));
         int closed = 0, emptyPasses = 0;
@@ -68,15 +81,15 @@ public sealed class SfpLiveRoutingClient
                 var stale = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var connection in connections.EnumerateArray())
                 {
-                    if (!connection.TryGetProperty("metadata", out var metadata) ||
-                        !metadata.TryGetProperty("processPath", out var processPath) || processPath.ValueKind != JsonValueKind.String ||
-                        !paths.Contains(NormalizePath(processPath.GetString()!))) continue;
+                    if (!connection.TryGetProperty("metadata", out var metadata) || metadata.ValueKind != JsonValueKind.Object) continue;
+                    bool? desiredVpn = desiredRoute(metadata);
+                    if (!desiredVpn.HasValue) continue;
                     bool knownRoute = connection.TryGetProperty("chains", out var chains) &&
                         chains.ValueKind == JsonValueKind.Array && chains.GetArrayLength() > 0;
                     bool direct = knownRoute && chains.EnumerateArray().Any(chain => chain.ValueKind == JsonValueKind.String && chain.GetString() == "direct");
                     bool bypassesVpn = metadata.TryGetProperty("destinationIP", out var destination) &&
                         destination.ValueKind == JsonValueKind.String && SfpDirectRouteExceptions.BypassesVpn(destination.GetString());
-                    bool expectedDirect = !desiredVpn || bypassesVpn;
+                    bool expectedDirect = !desiredVpn.Value || bypassesVpn;
                     // Unknown routes for this app are also closed; never guess that they are already correct.
                     // LAN/loopback connections remain direct even while the app's VPN toggle is on.
                     if (knownRoute && direct == expectedDirect) continue;

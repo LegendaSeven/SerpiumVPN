@@ -15,6 +15,40 @@
             <ControlTemplate.Triggers><Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.6"/></Trigger></ControlTemplate.Triggers>
         </ControlTemplate></Setter.Value></Setter>
     </Style>
+    <Style x:Key="WebsiteInputStyle" TargetType="TextBox">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/>
+        <Setter Property="Background" Value="{DynamicResource Theme.Input}"/>
+        <Setter Property="CaretBrush" Value="{DynamicResource Theme.Text}"/>
+        <Setter Property="SelectionBrush" Value="{DynamicResource Theme.Secondary}"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="TextBox">
+            <Border x:Name="InputBorder" Background="{TemplateBinding Background}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" CornerRadius="10">
+                <ScrollViewer x:Name="PART_ContentHost" Margin="{TemplateBinding Padding}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="InputBorder" Property="BorderBrush" Value="{DynamicResource Theme.Focus}"/></Trigger>
+                <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.6"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="RoutingTab" TargetType="ToggleButton">
+        <Setter Property="Foreground" Value="{DynamicResource Theme.Muted}"/><Setter Property="Padding" Value="9,8"/><Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
+            <Border x:Name="TabBorder" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsChecked" Value="True"><Setter TargetName="TabBorder" Property="Background" Value="{DynamicResource Theme.Secondary}"/><Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/><Setter Property="FontWeight" Value="SemiBold"/></Trigger>
+                <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="TabBorder" Property="BorderBrush" Value="{DynamicResource Theme.Focus}"/></Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate></Setter.Value></Setter>
+    </Style>
+    <Style x:Key="RoutingList" TargetType="ListBox" BasedOn="{StaticResource {x:Type ListBox}}">
+        <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Foreground" Value="{DynamicResource Theme.Text}"/>
+        <Setter Property="ScrollViewer.HorizontalScrollBarVisibility" Value="Disabled"/><Setter Property="ScrollViewer.CanContentScroll" Value="True"/>
+        <Setter Property="VirtualizingPanel.IsVirtualizing" Value="True"/><Setter Property="VirtualizingPanel.VirtualizationMode" Value="Recycling"/>
+        <Setter Property="ItemContainerStyle"><Setter.Value><Style TargetType="ListBoxItem">
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Focusable" Value="False"/><Setter Property="Padding" Value="0"/>
+            <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><ContentPresenter/></ControlTemplate></Setter.Value></Setter>
+        </Style></Setter.Value></Setter>
+    </Style>
     <Style x:Key="ProfileTrashButton" TargetType="Button">
         <Setter Property="Width" Value="30"/><Setter Property="Height" Value="30"/>
         <Setter Property="Padding" Value="5"/><Setter Property="Cursor" Value="Hand"/>

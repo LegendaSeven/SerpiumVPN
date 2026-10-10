@@ -16,10 +16,30 @@ internal static class UserApplicationPolicy
         "searchhost", "searchapp", "startmenuexperiencehost", "shellexperiencehost", "widgets",
         "widgetservice", "msedgewebview2", "microsoftedgeupdate", "backgroundtaskhost", "dllhost",
         "rundll32", "cmd", "powershell", "pwsh", "conhost", "windowsterminal", "wt", "wsl", "wslhost",
-        "node", "java", "javaw", "python", "pythonw", "dotnet", "msiexec", "taskmgr", "regedit"
+        "node", "java", "javaw", "python", "pythonw", "dotnet", "msiexec", "taskmgr", "regedit",
+        "browser_proxy", "chrome_proxy", "msedge_proxy",
+        "windowspackagemanagerserver", "winget", "appinstaller"
     };
     private static readonly string[] AuxiliaryTokens =
         ["unins", "uninstall", "setup", "installer", "crash", "updater", "helper", "service", "broker", "telemetry", "redist"];
+    // These built-in utilities may declare internetClient or send telemetry. Neither
+    // makes them useful automatic VPN suggestions. Use stable identities, not labels.
+    private static readonly HashSet<string> AutomaticExcludedPackages = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Microsoft.WindowsCalculator_8wekyb3d8bbwe", "Microsoft.SecHealthUI_8wekyb3d8bbwe",
+        "Microsoft.DesktopAppInstaller_8wekyb3d8bbwe",
+        "Microsoft.WindowsTerminal_8wekyb3d8bbwe", "Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe",
+        "Microsoft.MixedReality.Portal_8wekyb3d8bbwe", "Microsoft.Microsoft3DViewer_8wekyb3d8bbwe",
+        "Microsoft.ZuneMusic_8wekyb3d8bbwe", "Microsoft.GetHelp_8wekyb3d8bbwe",
+        "Microsoft.MSPaint_8wekyb3d8bbwe", "Microsoft.Paint_8wekyb3d8bbwe",
+        "Microsoft.WindowsNotepad_8wekyb3d8bbwe", "Microsoft.ScreenSketch_8wekyb3d8bbwe",
+        "Microsoft.WindowsSoundRecorder_8wekyb3d8bbwe", "Microsoft.WindowsAlarms_8wekyb3d8bbwe",
+        "Microsoft.WindowsCamera_8wekyb3d8bbwe", "Microsoft.Windows.Photos_8wekyb3d8bbwe"
+    };
+    private static readonly HashSet<string> AutomaticExcludedExecutables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "calc", "calculator", "calculatorapp", "notepad", "mspaint", "wordpad", "charmap", "snippingtool"
+    };
     private static readonly HashSet<string> NetworkClients = new(StringComparer.OrdinalIgnoreCase)
     {
         "chrome", "firefox", "msedge", "brave", "opera", "vivaldi", "waterfox", "librewolf",
@@ -33,6 +53,35 @@ internal static class UserApplicationPolicy
 
     internal static bool IsAllowedPath(string path, string windowsDirectory, IReadOnlySet<string> services)
     {
+        if (!IsAllowedManualPath(path, windowsDirectory, services)) return false;
+        if (IsAutomaticUtility(path)) return false;
+        string name = Path.GetFileNameWithoutExtension(path);
+        if (AuxiliaryTokens.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase))) return false;
+        string[] words = Regex.Replace(name, "([a-z])([A-Z])", "$1 $2").Split([' ', '-', '_', '.'], StringSplitOptions.RemoveEmptyEntries);
+        return !words.Any(word => word.Equals("agent",StringComparison.OrdinalIgnoreCase) ||
+                                  word.Equals("host",StringComparison.OrdinalIgnoreCase) ||
+                                  word.Equals("update",StringComparison.OrdinalIgnoreCase));
+    }
+
+    internal static bool IsAutomaticUtility(string path, string applicationId = "")
+    {
+        int separator = applicationId.IndexOf('!');
+        if (separator > 0 && AutomaticExcludedPackages.Contains(applicationId[..separator])) return true;
+        if (AutomaticExcludedExecutables.Contains(Path.GetFileNameWithoutExtension(path))) return true;
+        // A process or an EXE shortcut may lack AUMID. Package directories contain
+        // Name_Version_Architecture_ResourceId_PublisherId, even after Store updates.
+        string[] parts = path.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
+        for (int i = 0; i + 1 < parts.Length; i++)
+        {
+            if (!parts[i].Equals("WindowsApps", StringComparison.OrdinalIgnoreCase)) continue;
+            string[] package = parts[i + 1].Split('_');
+            if (package.Length == 5 && AutomaticExcludedPackages.Contains(package[0] + "_" + package[4])) return true;
+        }
+        return false;
+    }
+
+    internal static bool IsAllowedManualPath(string path, string windowsDirectory, IReadOnlySet<string> services)
+    {
         if (!Path.IsPathFullyQualified(path) || !path.EndsWith(".exe", StringComparison.OrdinalIgnoreCase)) return false;
         path = Path.GetFullPath(path);
         if (path.StartsWith(@"\\",StringComparison.Ordinal)) return false;
@@ -41,11 +90,7 @@ internal static class UserApplicationPolicy
         if (parts.Any(part => part.Equals("Common Files", StringComparison.OrdinalIgnoreCase) ||
                               part.Equals("SystemApps", StringComparison.OrdinalIgnoreCase))) return false;
         string name = Path.GetFileNameWithoutExtension(path);
-        if (Infrastructure.Contains(name) || AuxiliaryTokens.Any(token => name.Contains(token, StringComparison.OrdinalIgnoreCase))) return false;
-        string[] words = Regex.Replace(name, "([a-z])([A-Z])", "$1 $2").Split([' ', '-', '_', '.'], StringSplitOptions.RemoveEmptyEntries);
-        return !words.Any(word => word.Equals("agent",StringComparison.OrdinalIgnoreCase) ||
-                                  word.Equals("host",StringComparison.OrdinalIgnoreCase) ||
-                                  word.Equals("update",StringComparison.OrdinalIgnoreCase));
+        return !Infrastructure.Contains(name);
     }
 
     internal static bool IsKnownNetworkClient(string path, string product, string company)

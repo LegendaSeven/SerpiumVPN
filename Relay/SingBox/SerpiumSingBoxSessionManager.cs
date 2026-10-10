@@ -767,6 +767,19 @@ public sealed class SerpiumSingBoxSessionManager : IDisposable
         return closed;
     }
 
+    public async Task<int> ApplySfpLivePolicyAsync(string activationProbe, SfpRoutingPolicy policy,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsRunning) throw new InvalidOperationException("Live TUN routing is unavailable.");
+        int? processId = ProcessId;
+        var client = new SfpLiveRoutingClient(_clashApiClient, _clashApiPort, _clashApiSecret);
+        await client.WaitForPolicyAsync(activationProbe, cancellationToken);
+        int closed = await client.CloseStaleConnectionsAsync(policy, cancellationToken);
+        if (!IsRunning || ProcessId != processId) throw new InvalidOperationException("TUN session changed during the route switch.");
+        _lastActiveConnectionFingerprint = string.Empty;
+        return closed;
+    }
+
     public async Task<int> CloseOppositeRouteConnectionsAsync(
         IEnumerable<string> processPaths,
         SingBoxObservedRoute desiredRoute,

@@ -283,28 +283,8 @@ public static class SerpiumRoutingConfigCompiler
         }
         else
         {
-            if (policy.ExecutablePaths.Length > 0)
-            {
-                rules.Add(new JsonObject
-                {
-                    ["process_path"] = ToJsonArray(policy.ExecutablePaths)
-                });
-            }
-
-            if (policy.ExactDomains.Length > 0 ||
-                policy.SuffixDomains.Length > 0)
-            {
-                JsonObject domainRule = new();
-                if (policy.ExactDomains.Length > 0)
-                    domainRule["domain"] = ToJsonArray(policy.ExactDomains);
-                if (policy.SuffixDomains.Length > 0)
-                {
-                    domainRule["domain_suffix"] =
-                        ToJsonArray(policy.SuffixDomains);
-                }
-
-                rules.Add(domainRule);
-            }
+            rules = WebsiteRoutingPolicy.BuildMatches(policy.ExecutablePaths, policy.Websites);
+            if (rules.Count == 0) rules.Add(new JsonObject { ["network"] = new JsonArray("tcp", "udp"), ["invert"] = true });
         }
 
         if (activationProbe is not null)
@@ -435,7 +415,7 @@ public static class SerpiumRoutingConfigCompiler
                 $"Включено слишком много EXE: {executablePaths.Count}. Максимум: {MaximumExecutablePaths}.");
         }
 
-        if (exactDomains.Count + suffixDomains.Count > MaximumDomains)
+        if (registryEntries.Count(item => item.Kind == RoutingTargetKind.Website) > MaximumDomains)
         {
             throw new InvalidOperationException(
                 $"Включено слишком много доменных правил. Максимум: {MaximumDomains}.");
@@ -450,7 +430,7 @@ public static class SerpiumRoutingConfigCompiler
             exactDomains.ToArray(),
             suffixDomains.ToArray(),
             applicationCards,
-            websiteCards);
+            websiteCards, WebsiteRoutingPolicy.Read(registryEntries));
     }
 
     private static (int Port, string Secret)
@@ -648,29 +628,10 @@ public static class SerpiumRoutingConfigCompiler
         }
         else
         {
-            if (policy.ExecutablePaths.Length > 0)
+            foreach (JsonObject match in WebsiteRoutingPolicy.BuildMatches(policy.ExecutablePaths, policy.Websites).OfType<JsonObject>())
             {
-                rules.Add(new JsonObject
-                {
-                    ["process_path"] = ToJsonArray(policy.ExecutablePaths),
-                    ["action"] = "route",
-                    ["outbound"] = proxyTag
-                });
-            }
-
-            if (policy.ExactDomains.Length > 0 || policy.SuffixDomains.Length > 0)
-            {
-                JsonObject domainRule = new()
-                {
-                    ["action"] = "route",
-                    ["outbound"] = proxyTag
-                };
-                if (policy.ExactDomains.Length > 0)
-                    domainRule["domain"] = ToJsonArray(policy.ExactDomains);
-                if (policy.SuffixDomains.Length > 0)
-                    domainRule["domain_suffix"] = ToJsonArray(policy.SuffixDomains);
-
-                rules.Add(domainRule);
+                var rule = (JsonObject)match.DeepClone();
+                rule["action"] = "route"; rule["outbound"] = proxyTag; rules.Add(rule);
             }
         }
 
@@ -736,29 +697,10 @@ public static class SerpiumRoutingConfigCompiler
         }
         else
         {
-            if (policy.ExecutablePaths.Length > 0)
+            foreach (JsonObject match in WebsiteRoutingPolicy.BuildMatches(policy.ExecutablePaths, policy.Websites).OfType<JsonObject>())
             {
-                selectiveRules.Add(new JsonObject
-                {
-                    ["process_path"] = ToJsonArray(policy.ExecutablePaths),
-                    ["action"] = "route",
-                    ["server"] = proxyDnsTag
-                });
-            }
-
-            if (policy.ExactDomains.Length > 0 || policy.SuffixDomains.Length > 0)
-            {
-                JsonObject domainDnsRule = new()
-                {
-                    ["action"] = "route",
-                    ["server"] = proxyDnsTag
-                };
-                if (policy.ExactDomains.Length > 0)
-                    domainDnsRule["domain"] = ToJsonArray(policy.ExactDomains);
-                if (policy.SuffixDomains.Length > 0)
-                    domainDnsRule["domain_suffix"] = ToJsonArray(policy.SuffixDomains);
-
-                selectiveRules.Add(domainDnsRule);
+                var rule = (JsonObject)match.DeepClone();
+                rule["action"] = "route"; rule["server"] = proxyDnsTag; selectiveRules.Add(rule);
             }
         }
 
@@ -768,6 +710,8 @@ public static class SerpiumRoutingConfigCompiler
         dns["rules"] = selectiveRules;
         dns["final"] = DirectDnsTag;
         dns["reverse_mapping"] = true;
+        // A domain switched to VPN must not reuse the direct resolver's cached answer.
+        dns["independent_cache"] = true;
         if (dns["strategy"] is null)
             dns["strategy"] = "ipv4_only";
     }
@@ -963,11 +907,11 @@ public static class SerpiumRoutingConfigCompiler
         string[] ExactDomains,
         string[] SuffixDomains,
         int ApplicationCards,
-        int WebsiteCards)
+        int WebsiteCards, WebsiteRoute[] Websites)
     {
         public bool HasRules =>
             ExecutablePaths.Length > 0 ||
             ExactDomains.Length > 0 ||
-            SuffixDomains.Length > 0;
+            SuffixDomains.Length > 0 || Websites.Length > 0;
     }
 }

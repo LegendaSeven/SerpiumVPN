@@ -8,11 +8,11 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Serpium.App.ico</ApplicationIcon>
-    <AssemblyVersion>1.0.56.8</AssemblyVersion>
-    <FileVersion>1.0.56.8</FileVersion>
-    <Version>1.0.56.8</Version>
-    <VersionPrefix>1.0.56.8</VersionPrefix>
-    <InformationalVersion>1.0.56.8</InformationalVersion>
+    <AssemblyVersion>1.0.56.13</AssemblyVersion>
+    <FileVersion>1.0.56.13</FileVersion>
+    <Version>1.0.56.13</Version>
+    <VersionPrefix>1.0.56.13</VersionPrefix>
+    <InformationalVersion>1.0.56.13</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
     <Compile Remove="SerpiumUpdater\**\*.cs" />

@@ -94,7 +94,7 @@ public partial class MainWindow : Window
         try
         {
             _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync(cancellationToken))
-                .Where(item => item.Kind == RoutingTargetKind.Application).ToArray();
+                .ToArray();
             bool isXray = string.Equals(entry.Engine, "xray", StringComparison.OrdinalIgnoreCase);
             var policy = await _routingRuleSetRuntime.UpdateAsync(_routingRegistryEntries, isXray, cancellationToken);
             string relayDirectory = Path.Combine(AppContext.BaseDirectory, "bin_files", "relay");

@@ -8,7 +8,14 @@ using Microsoft.Win32;
 
 namespace SerpiumVPN.Relay.Routing;
 
-public sealed record DiscoveredApplication(string DisplayName, string ExecutablePath);
+public sealed record DiscoveredApplication(string DisplayName, string ExecutablePath)
+{
+    public string ApplicationId { get; init; } = "";
+    public string[] ExecutablePaths { get; init; } = [];
+    public bool IsWebApplication { get; init; }
+    public ManualApplicationTarget ToTarget() => new(DisplayName, ExecutablePath, IsWebApplication)
+        { ApplicationId = ApplicationId, ExecutablePaths = ExecutablePaths };
+}
 
 /// <summary>Lists user-facing network apps, with cached registrations and passive process observation.</summary>
 public sealed class InstalledApplicationDiscovery : IDisposable
@@ -16,8 +23,10 @@ public sealed class InstalledApplicationDiscovery : IDisposable
     private readonly SemaphoreSlim _gate = new(1,1);
     private readonly Dictionary<string, Metadata> _metadata = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string,string> _catalog = new(StringComparer.OrdinalIgnoreCase);
+    private IReadOnlyList<ApplicationCatalogItem> _catalogEntries = [];
     private HashSet<string> _services = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string,DateTimeOffset> _observed = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _verifiedUserApps = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> _visibleUserApps = new(StringComparer.OrdinalIgnoreCase);
     private readonly ConcurrentDictionary<string,DateTimeOffset> _engineObserved = new(StringComparer.OrdinalIgnoreCase);
     private readonly string _historyPath;
@@ -34,11 +43,7 @@ public sealed class InstalledApplicationDiscovery : IDisposable
     public InstalledApplicationDiscovery() : this(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SerpiumVPN","network-applications.json")) { }
 
-    internal InstalledApplicationDiscovery(string historyPath) : this(historyPath, new[]
-    {
-        Environment.GetFolderPath(Environment.SpecialFolder.StartMenu),
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu)
-    }) { }
+    internal InstalledApplicationDiscovery(string historyPath) : this(historyPath, WindowsApplicationCatalog.ShortcutDirectories()) { }
 
     internal InstalledApplicationDiscovery(string historyPath, IEnumerable<string> watchDirectories)
     {
@@ -49,9 +54,10 @@ public sealed class InstalledApplicationDiscovery : IDisposable
             {
                 var watcher = new FileSystemWatcher(directory)
                 {
-                    IncludeSubdirectories = true,
+                    IncludeSubdirectories = !WindowsApplicationCatalog.IsDesktop(directory),
                     NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite
                 };
+                watcher.Filters.Add("*.lnk"); watcher.Filters.Add("*.url"); watcher.Filters.Add("*.appref-ms");
                 watcher.Created += CatalogChanged;
                 watcher.Deleted += CatalogChanged;
                 watcher.Changed += CatalogChanged;
@@ -113,9 +119,11 @@ public sealed class InstalledApplicationDiscovery : IDisposable
         {
             // Build a new snapshot first: cancellation never commits a partial catalogue.
             HashSet<string> services = ReadServiceExecutables(token);
-            Dictionary<string,string> catalog = ReadCatalog(token);
+            var entries = SanitizePackageExecutables(WindowsApplicationCatalog.Read(token), services);
+            Dictionary<string,string> catalog = ReadCatalog(token, entries);
             _services = services;
             _catalog = catalog;
+            _catalogEntries = entries;
             // A short fallback also covers App Paths registrations without a Start Menu shortcut.
             _catalogExpires = now.AddMinutes(1);
             _appliedCatalogChangeTicks = changeTicks;
@@ -129,20 +137,38 @@ public sealed class InstalledApplicationDiscovery : IDisposable
         foreach (var stale in _engineObserved.Where(item => now - item.Value > TimeSpan.FromSeconds(15)))
             _engineObserved.TryRemove(stale.Key,out _);
         var processes = UserNetworkProcessSnapshot.Capture(token, _engineObserved.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase));
+        _catalogEntries = SanitizePackageExecutables(MergePackageProcesses(_catalogEntries, processes), _services);
+        var excludedPackagePaths = _catalogEntries.Where(item => !item.Target.IsWebApplication &&
+                UserApplicationPolicy.IsAutomaticUtility(item.Target.PrimaryValue, item.Target.ApplicationId))
+            .SelectMany(item => item.Target.ExecutablePaths.Append(item.Target.PrimaryValue)).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool AutoAllowed(string path) => IsAllowed(path) && !excludedPackagePaths.Contains(path);
+        foreach (var item in _catalogEntries.Where(item => item.Target.ApplicationId.Length > 0 && item.Target.PrimaryValue.Length > 0 && item.Target.UnsupportedReason.Length == 0))
+            _catalog[item.Target.PrimaryValue] = item.DisplayName;
         var running = new HashSet<string>(processes.Select(item => item.Path),StringComparer.OrdinalIgnoreCase);
         foreach (var process in processes)
         {
             token.ThrowIfCancellationRequested();
-            if (!IsAllowed(process.Path)) continue;
+            if (!AutoAllowed(process.Path)) continue;
             if (process.HasWindow && _visibleUserApps.Count < 2048) _visibleUserApps.Add(process.Path);
         }
-        foreach (var process in processes)
+        // Old history only proves network activity. It cannot stand in for a user
+        // app registration/window; otherwise background components return forever.
+        bool HasUserEntryPoint(string path) => _catalog.ContainsKey(path) || _visibleUserApps.Contains(path) || _verifiedUserApps.Contains(path);
+        var internetPaths = processes.Where(process => process.UsesInternet &&
+                UserApplicationPolicy.IsAllowedManualPath(process.Path, _windows, _services))
+            .Select(process => process.Path).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Attribute a declared package companion's real traffic to its app entry.
+        // Manifest network permission by itself is deliberately not evidence.
+        var observedPaths = internetPaths.Concat(_catalogEntries.Where(item => item.Target.ApplicationId.Length > 0 &&
+                item.Target.UnsupportedReason.Length == 0 && item.Target.ExecutablePaths.Any(internetPaths.Contains))
+            .Select(item => item.Target.PrimaryValue)).Distinct(StringComparer.OrdinalIgnoreCase);
+        foreach (string path in observedPaths)
         {
-            if (!process.UsesInternet || !IsAllowed(process.Path) ||
-                (!_catalog.ContainsKey(process.Path) && !_visibleUserApps.Contains(process.Path) && !_observed.ContainsKey(process.Path))) continue;
-            if (!_observed.TryGetValue(process.Path,out var previous) || now - previous > TimeSpan.FromDays(1))
+            if (!AutoAllowed(path) || !HasUserEntryPoint(path)) continue;
+            if (_verifiedUserApps.Add(path)) _historyDirty = true;
+            if (!_observed.TryGetValue(path,out var previous) || now - previous > TimeSpan.FromDays(1))
             {
-                _observed[process.Path] = now;
+                _observed[path] = now;
                 _historyDirty = true;
             }
         }
@@ -151,26 +177,103 @@ public sealed class InstalledApplicationDiscovery : IDisposable
         foreach (string path in paths)
         {
             token.ThrowIfCancellationRequested();
-            if (!IsAllowed(path)) continue;
+            if (!AutoAllowed(path)) continue;
             Metadata info = ReadMetadata(path);
+            var registered = _catalogEntries.FirstOrDefault(item => !item.Target.IsWebApplication && item.Target.PrimaryValue.Equals(path, StringComparison.OrdinalIgnoreCase));
+            if (registered?.Target.UnsupportedReason.Length > 0) continue;
             bool observed = _observed.TryGetValue(path,out var lastSeen) && now - lastSeen < TimeSpan.FromDays(90);
-            if (!UserApplicationPolicy.ShouldInclude(true,_catalog.ContainsKey(path) || _visibleUserApps.Contains(path) || observed,
+            if (!UserApplicationPolicy.ShouldInclude(true,HasUserEntryPoint(path),
                     UserApplicationPolicy.IsKnownNetworkClient(path,info.Product,info.Company),observed)) continue;
             string? label = _catalog.GetValueOrDefault(path);
             if (string.IsNullOrWhiteSpace(label)) label = info.Description;
             if (string.IsNullOrWhiteSpace(label)) label = Path.GetFileNameWithoutExtension(path);
-            candidates.Add((new(label.Trim(),path),info));
+            candidates.Add((new(label.Trim(),path) { ApplicationId = registered?.Target.ApplicationId ?? "", ExecutablePaths = registered?.Target.ExecutablePaths ?? [] },info));
         }
-        var result = candidates.GroupBy(item => UserApplicationPolicy.Identity(item.App.ExecutablePath,item.Info.Product,item.Info.Company),StringComparer.OrdinalIgnoreCase)
+        var result = candidates.GroupBy(item => item.App.ApplicationId.Length > 0 ? item.App.ApplicationId : UserApplicationPolicy.Identity(item.App.ExecutablePath,item.Info.Product,item.Info.Company),StringComparer.OrdinalIgnoreCase)
             .Select(group => group.OrderByDescending(item => running.Contains(item.App.ExecutablePath))
                 .ThenByDescending(item => item.Info.ModifiedUtc).ThenBy(item => item.App.ExecutablePath,StringComparer.OrdinalIgnoreCase).First().App)
+            .Concat(_catalogEntries.Where(item => item.Target.IsWebApplication && !item.Target.RequiresWebsiteAddress && item.Target.PrimaryValue.Length > 0 &&
+                    Path.GetExtension(item.Target.SourcePath).Equals(".lnk", StringComparison.OrdinalIgnoreCase))
+                .Select(item => new DiscoveredApplication(item.DisplayName, item.Target.PrimaryValue) { IsWebApplication = true }))
             .OrderBy(app => app.DisplayName,StringComparer.CurrentCultureIgnoreCase).ThenBy(app => app.ExecutablePath,StringComparer.OrdinalIgnoreCase)
             .Take(512).ToArray();
-        foreach (string stale in _observed.Where(item => now - item.Value >= TimeSpan.FromDays(90) || !IsAllowed(item.Key)).Select(item => item.Key).ToArray())
+        foreach (string path in _observed.Keys.Where(path => AutoAllowed(path) && HasUserEntryPoint(path)))
+            if (_verifiedUserApps.Add(path)) _historyDirty = true;
+        foreach (string stale in _observed.Where(item => now - item.Value >= TimeSpan.FromDays(90) || !AutoAllowed(item.Key) || !HasUserEntryPoint(item.Key)).Select(item => item.Key).ToArray())
         { _observed.Remove(stale); _historyDirty = true; }
-        _visibleUserApps.RemoveWhere(path => !IsAllowed(path));
+        _verifiedUserApps.RemoveWhere(path => !_observed.ContainsKey(path));
+        _visibleUserApps.RemoveWhere(path => !AutoAllowed(path));
         SaveHistory(now);
         return result;
+    }
+
+    internal static void ValidateManualApplication(string path, CancellationToken token)
+    {
+        if (!File.Exists(path) || !UserApplicationPolicy.IsAllowedManualPath(path,
+            Environment.GetFolderPath(Environment.SpecialFolder.Windows), ReadServiceExecutables(token)))
+            throw new InvalidOperationException("Выберите EXE пользовательского приложения. Системные службы и компоненты VPN добавлять нельзя.");
+    }
+
+    internal static string[] FilterManualExecutables(IEnumerable<string> paths, CancellationToken token)
+    {
+        var services = ReadServiceExecutables(token);
+        string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+        return paths.Where(path => File.Exists(path) && UserApplicationPolicy.IsAllowedManualPath(path, windows, services)).ToArray();
+    }
+
+    public static Task<IReadOnlyList<ApplicationCatalogItem>> SelectionCatalogAsync(bool running, CancellationToken token = default) =>
+        WindowsApplicationCatalog.OnSta<IReadOnlyList<ApplicationCatalogItem>>(() =>
+        {
+            var services = ReadServiceExecutables(token);
+            string windows = Environment.GetFolderPath(Environment.SpecialFolder.Windows);
+            var processes = UserNetworkProcessSnapshot.Capture(token);
+            var entries = SanitizePackageExecutables(MergePackageProcesses(WindowsApplicationCatalog.Read(token), processes), services);
+            bool Allowed(string path) => File.Exists(path) && UserApplicationPolicy.IsAllowedManualPath(path, windows, services);
+            if (!running)
+                return entries.Where(item => item.Target.IsWebApplication || item.Target.RequiresRunningApplication ||
+                    (item.Target.ApplicationId.Length > 0 && item.Target.PrimaryValue.Length == 0) || Allowed(item.Target.PrimaryValue)).ToArray();
+            return processes.Where(process => Allowed(process.Path) && (process.HasWindow || process.UsesInternet))
+                .GroupBy(process => process.Path, StringComparer.OrdinalIgnoreCase).Select(group =>
+                {
+                    var process = group.First();
+                    var match = entries.FirstOrDefault(item => !item.Target.IsWebApplication &&
+                        ((process.ApplicationId.Length > 0 && item.Target.ApplicationId == process.ApplicationId) || item.Target.PrimaryValue.Equals(process.Path, StringComparison.OrdinalIgnoreCase)));
+                    if (match is not null) return match with { Category = "Запущено · " + match.Category };
+                    string label = Path.GetFileNameWithoutExtension(process.Path);
+                    try { var info = FileVersionInfo.GetVersionInfo(process.Path); label = info.ProductName ?? info.FileDescription ?? label; } catch (Exception error) when (WindowsApplicationCatalog.IsReadError(error)) { }
+                    return new ApplicationCatalogItem(new(label, process.Path, false) { ApplicationId = process.ApplicationId }, "Запущенное приложение");
+                }).OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase).ToArray();
+        }, token);
+
+    internal static IReadOnlyList<ApplicationCatalogItem> MergePackageProcesses(IReadOnlyList<ApplicationCatalogItem> entries, IReadOnlyList<UserNetworkProcess> processes) =>
+        entries.Select(item =>
+        {
+            if (item.Target.ApplicationId.Length == 0) return item;
+            string[] observed = processes.Where(process => process.ApplicationId.Equals(item.Target.ApplicationId, StringComparison.OrdinalIgnoreCase))
+                .Select(process => process.Path).Where(path => File.Exists(path) && UserApplicationPolicy.IsAllowedManualPath(path,
+                    Environment.GetFolderPath(Environment.SpecialFolder.Windows), new HashSet<string>())).ToArray();
+            string[] paths = item.Target.ExecutablePaths.Concat(observed).Distinct(StringComparer.OrdinalIgnoreCase).Take(64).ToArray();
+            string primary = File.Exists(item.Target.PrimaryValue) ? item.Target.PrimaryValue : paths.FirstOrDefault() ?? "";
+            return item with { Target = item.Target with { PrimaryValue = primary, ExecutablePaths = paths } };
+        }).ToArray();
+
+    internal static IReadOnlyList<ApplicationCatalogItem> SanitizePackageExecutables(IReadOnlyList<ApplicationCatalogItem> entries, IReadOnlySet<string> services)
+    {
+        var owners = entries.Where(item => item.Target.ApplicationId.Length > 0).SelectMany(item => item.Target.ExecutablePaths.Append(item.Target.PrimaryValue)
+            .Where(path => path.Length > 0).Select(path => (Path: path, Id: item.Target.ApplicationId)))
+            .GroupBy(item => item.Path, StringComparer.OrdinalIgnoreCase).ToDictionary(group => group.Key,
+                group => group.Select(item => item.Id).Distinct(StringComparer.OrdinalIgnoreCase).Count(), StringComparer.OrdinalIgnoreCase);
+        return entries.Select(item =>
+        {
+            if (item.Target.ApplicationId.Length == 0) return item;
+            bool Allowed(string path) => File.Exists(path) && UserApplicationPolicy.IsAllowedManualPath(path,
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows), services);
+            string[] paths = item.Target.ExecutablePaths.Append(item.Target.PrimaryValue).Where(path => Allowed(path) && owners.GetValueOrDefault(path) <= 1)
+                .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+            string primary = Allowed(item.Target.PrimaryValue) ? item.Target.PrimaryValue : paths.FirstOrDefault() ?? "";
+            string reason = owners.GetValueOrDefault(primary) > 1 ? "Общий EXE нескольких приложений — раздельное переключение недоступно" : item.Target.UnsupportedReason;
+            return item with { Target = item.Target with { PrimaryValue = primary, ExecutablePaths = paths, UnsupportedReason = reason } };
+        }).ToArray();
     }
 
     private bool IsAllowed(string path)
@@ -195,7 +298,7 @@ public sealed class InstalledApplicationDiscovery : IDisposable
         { return _metadata[path] = new("","","",DateTime.MinValue); }
     }
 
-    private static Dictionary<string,string> ReadCatalog(CancellationToken token)
+    private static Dictionary<string,string> ReadCatalog(CancellationToken token, IReadOnlyList<ApplicationCatalogItem> entries)
     {
         var apps = new Dictionary<string,string>(StringComparer.OrdinalIgnoreCase);
         void Add(string? target,string? label = null)
@@ -210,37 +313,8 @@ public sealed class InstalledApplicationDiscovery : IDisposable
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
         }
-        object? shell = null;
-        try
-        {
-            Type? shellType = Type.GetTypeFromProgID("WScript.Shell");
-            if (shellType is not null) shell = Activator.CreateInstance(shellType);
-            if (shell is not null)
-            {
-                foreach (var folder in new[] { Environment.SpecialFolder.StartMenu, Environment.SpecialFolder.CommonStartMenu })
-                {
-                    string directory = Environment.GetFolderPath(folder);
-                    if (!Directory.Exists(directory)) continue;
-                    var options = new EnumerationOptions { RecurseSubdirectories = true, IgnoreInaccessible = true, MaxRecursionDepth = 8, AttributesToSkip = FileAttributes.ReparsePoint };
-                    foreach (string link in Directory.EnumerateFiles(directory,"*.lnk",options).Take(4096))
-                    {
-                        token.ThrowIfCancellationRequested();
-                        object? shortcut = null;
-                        try
-                        {
-                            shortcut = ((dynamic)shell).CreateShortcut(link);
-                            string target = (string)((dynamic)shortcut).TargetPath;
-                            string arguments = (string)((dynamic)shortcut).Arguments;
-                            Add(ResolveShortcutTarget(target,arguments),Path.GetFileNameWithoutExtension(link));
-                        }
-                        catch (Exception ex) when (ex is COMException or IOException or UnauthorizedAccessException or ArgumentException) { }
-                        finally { if (shortcut is not null && Marshal.IsComObject(shortcut)) Marshal.FinalReleaseComObject(shortcut); }
-                    }
-                }
-            }
-        }
-        catch (COMException) { }
-        finally { if (shell is not null && Marshal.IsComObject(shell)) Marshal.FinalReleaseComObject(shell); }
+        foreach (var entry in entries.Where(item => !item.Target.IsWebApplication && item.Target.UnsupportedReason.Length == 0))
+            Add(entry.Target.PrimaryValue, entry.DisplayName);
         foreach (var hive in new[] { RegistryHive.CurrentUser, RegistryHive.LocalMachine })
         foreach (var view in new[] { RegistryView.Registry64, RegistryView.Registry32 })
         {
@@ -318,7 +392,10 @@ public sealed class InstalledApplicationDiscovery : IDisposable
             var history = JsonSerializer.Deserialize<HistoryEntry[]>(File.ReadAllText(_historyPath));
             foreach (var entry in (history ?? []).OfType<HistoryEntry>().Take(512))
                 if (!string.IsNullOrWhiteSpace(entry.Path) && now - entry.LastSeenUtc < TimeSpan.FromDays(90) && entry.LastSeenUtc <= now)
+                {
                     _observed[entry.Path] = entry.LastSeenUtc;
+                    if (entry.UserEntryPointConfirmed) _verifiedUserApps.Add(entry.Path);
+                }
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { }
     }
@@ -330,7 +407,7 @@ public sealed class InstalledApplicationDiscovery : IDisposable
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(_historyPath)!);
-            var history = _observed.OrderByDescending(item => item.Value).Take(512).Select(item => new HistoryEntry(item.Key,item.Value)).ToArray();
+            var history = _observed.OrderByDescending(item => item.Value).Take(512).Select(item => new HistoryEntry(item.Key,item.Value,_verifiedUserApps.Contains(item.Key))).ToArray();
             File.WriteAllText(temporary,JsonSerializer.Serialize(history));
             File.Move(temporary,_historyPath,true);
             _historyDirty = false;
@@ -344,5 +421,5 @@ public sealed class InstalledApplicationDiscovery : IDisposable
     }
 
     private sealed record Metadata(string Product,string Company,string Description,DateTime ModifiedUtc);
-    private sealed record HistoryEntry(string Path,DateTimeOffset LastSeenUtc);
+    private sealed record HistoryEntry(string Path,DateTimeOffset LastSeenUtc,bool UserEntryPointConfirmed = false);
 }

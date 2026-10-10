@@ -137,36 +137,61 @@
                 </Grid>
             </Border>
             <Border Grid.Column="2" Background="{DynamicResource Theme.Surface}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" CornerRadius="22" Padding="20">
-                <Grid>
-                    <Grid.RowDefinitions><RowDefinition Height="36"/><RowDefinition Height="*"/></Grid.RowDefinitions>
-                    <TextBlock Text="Приложения" FontSize="17" FontWeight="SemiBold"/>
-                    <TextBlock Text="VPN" FontSize="12" Foreground="{DynamicResource Theme.Muted}" HorizontalAlignment="Right" Margin="0,3,10,0"/>
-                    <ListBox x:Name="ApplicationList" Grid.Row="1" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource Theme.Text}"
-                             ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.CanContentScroll="True"
-                             VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling">
-                        <ListBox.ItemContainerStyle>
-                            <Style TargetType="ListBoxItem">
-                                <Setter Property="Width" Value="{Binding ActualWidth, RelativeSource={RelativeSource AncestorType={x:Type ScrollContentPresenter}}}"/>
-                                <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
-                                <Setter Property="Focusable" Value="False"/>
-                                <Setter Property="Padding" Value="0"/>
-                                <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem"><ContentPresenter/></ControlTemplate></Setter.Value></Setter>
-                            </Style>
-                        </ListBox.ItemContainerStyle>
-                        <ListBox.ItemTemplate>
-                            <DataTemplate>
+                <Grid x:Name="RoutingControls">
+                    <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+                    <Grid Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                        <StackPanel Orientation="Horizontal">
+                            <ToggleButton x:Name="ApplicationsTab" Content="Приложения" IsChecked="True" Style="{StaticResource RoutingTab}" Click="RoutingTab_Click"/>
+                            <ToggleButton x:Name="WebsitesTab" Content="Сайты" Margin="6,0,0,0" Style="{StaticResource RoutingTab}" Click="RoutingTab_Click"/>
+                        </StackPanel>
+                        <TextBlock Grid.Column="1" Text="VPN" FontSize="12" Foreground="{DynamicResource Theme.Muted}" VerticalAlignment="Center" Margin="8,0,5,0"/>
+                    </Grid>
+                    <Button x:Name="AddApplicationButton" Grid.Row="1" Content="＋ Добавить приложение" Click="AddApplication_Click" HorizontalAlignment="Left" Padding="10,7" MinHeight="34" Margin="0,0,0,8"/>
+                    <StackPanel x:Name="WebsiteEditor" Grid.Row="1" Visibility="Collapsed" Margin="0,0,0,8">
+                        <Label Target="WebsiteInput" Content="Домен или ссылка" Foreground="{DynamicResource Theme.Muted}" Padding="0,0,0,5"/>
+                        <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+                            <TextBox x:Name="WebsiteInput" Style="{StaticResource WebsiteInputStyle}" MinHeight="38" Padding="9,7" MaxLength="4096" KeyDown="WebsiteInput_KeyDown" AutomationProperties.Name="Домен или ссылка на сайт"/>
+                            <Button Grid.Column="1" Content="＋" FontSize="20" Width="38" Margin="6,0,0,0" Click="AddWebsite_Click" ToolTip="Добавить сайт" AutomationProperties.Name="Добавить сайт"/>
+                        </Grid>
+                        <CheckBox x:Name="IncludeSiteSubdomains" Content="Включая поддомены" IsChecked="True" Style="{StaticResource ProfileCheckBox}" Margin="0,5,0,3"/>
+                        <TextBlock Text="Правило сайта важнее приложения: включено — VPN, выключено — напрямую." FontSize="12" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Muted}"/>
+                    </StackPanel>
+                    <TextBlock x:Name="RoutingFeedback" Grid.Row="2" Visibility="Collapsed" TextWrapping="Wrap" Margin="0,0,0,8" FontSize="12" AutomationProperties.LiveSetting="Polite"/>
+                    <Grid x:Name="ApplicationsPanel" Grid.Row="3">
+                        <ListBox x:Name="ApplicationList" Style="{StaticResource RoutingList}" AutomationProperties.Name="Приложения для VPN">
+                            <ListBox.ItemTemplate><DataTemplate>
                                 <Border BorderBrush="{DynamicResource Theme.Divider}" BorderThickness="0,0,0,1" MinHeight="60">
-                                    <Grid>
-                                        <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="48"/></Grid.ColumnDefinitions>
-                                        <TextBlock Text="{Binding DisplayName}" TextWrapping="Wrap" VerticalAlignment="Center" Margin="0,8,12,8"/>
-                                        <ToggleButton Grid.Column="1" Style="{StaticResource AppToggle}" IsChecked="{Binding IsVpnEnabled, Mode=OneWay}"
-                                                      AutomationProperties.Name="{Binding AccessibleName}" Click="AppToggle_Click"/>
+                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/><ColumnDefinition Width="48"/></Grid.ColumnDefinitions>
+                                        <StackPanel VerticalAlignment="Center" Margin="0,8,8,8" ToolTip="{Binding RouteHint}">
+                                            <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                                            <TextBlock Text="{Binding Description}" Visibility="{Binding HasDescription, Converter={StaticResource BooleanVisibility}}" FontSize="11" Foreground="{DynamicResource Theme.Muted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"/>
+                                        </StackPanel>
+                                        <Button Grid.Column="1" Style="{StaticResource ProfileTrashButton}" Visibility="{Binding IsManuallyAdded, Converter={StaticResource BooleanVisibility}}" Click="DeleteApplication_Click" ToolTip="{Binding DeleteLabel}" AutomationProperties.Name="{Binding DeleteLabel}"/>
+                                        <ToggleButton Grid.Column="2" Style="{StaticResource AppToggle}" IsChecked="{Binding IsVpnEnabled, Mode=OneWay}" AutomationProperties.Name="{Binding AccessibleName}" Click="AppToggle_Click"/>
                                     </Grid>
                                 </Border>
-                            </DataTemplate>
-                        </ListBox.ItemTemplate>
-                    </ListBox>
-                    <TextBlock x:Name="EmptyListText" Grid.Row="1" Text="Ищем приложения…" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Muted}" Margin="0,15,0,0" IsHitTestVisible="False"/>
+                            </DataTemplate></ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock x:Name="EmptyListText" Text="Ищем приложения…" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Muted}" Margin="0,15,0,0" IsHitTestVisible="False"/>
+                    </Grid>
+                    <Grid x:Name="WebsitesPanel" Grid.Row="3" Visibility="Collapsed">
+                        <ListBox x:Name="WebsiteList" Style="{StaticResource RoutingList}" AutomationProperties.Name="Сайты для VPN">
+                            <ListBox.ItemTemplate><DataTemplate>
+                                <Border BorderBrush="{DynamicResource Theme.Divider}" BorderThickness="0,0,0,1" MinHeight="64">
+                                    <Grid><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="32"/><ColumnDefinition Width="48"/></Grid.ColumnDefinitions>
+                                        <StackPanel VerticalAlignment="Center" Margin="0,8,8,8">
+                                            <TextBlock Text="{Binding Domain}" TextTrimming="CharacterEllipsis" ToolTip="{Binding Domain}"/>
+                                            <TextBlock Text="{Binding Description}" FontSize="11" Foreground="{DynamicResource Theme.Muted}" Margin="0,3,0,0"/>
+                                        </StackPanel>
+                                        <Button Grid.Column="1" Style="{StaticResource ProfileTrashButton}" Click="DeleteWebsite_Click" ToolTip="{Binding DeleteLabel}" AutomationProperties.Name="{Binding DeleteLabel}"/>
+                                        <ToggleButton Grid.Column="2" Style="{StaticResource AppToggle}" IsChecked="{Binding IsVpnEnabled, Mode=OneWay}" AutomationProperties.Name="{Binding AccessibleName}" Click="WebsiteToggle_Click"/>
+                                    </Grid>
+                                </Border>
+                            </DataTemplate></ListBox.ItemTemplate>
+                        </ListBox>
+                        <TextBlock x:Name="EmptyWebsitesText" Text="Добавьте сайт выше. Другие домены этого сервиса можно добавить отдельными строками." TextWrapping="Wrap" Foreground="{DynamicResource Theme.Muted}" Margin="0,15,0,0" IsHitTestVisible="False"/>
+                    </Grid>
                 </Grid>
             </Border>
         </Grid>

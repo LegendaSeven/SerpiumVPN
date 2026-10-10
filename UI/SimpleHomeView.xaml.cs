@@ -12,6 +12,15 @@ public sealed class SimpleApplicationItem : INotifyPropertyChanged
 {
     public required string DisplayName { get; init; }
     public required string ExecutablePath { get; init; }
+    public Guid? RuleId { get; init; }
+    public bool IsManuallyAdded { get; init; }
+    public bool IsWebApplication { get; init; }
+    public string ApplicationId { get; init; } = "";
+    public string[] ExecutablePaths { get; init; } = [];
+    public bool HasDescription => IsWebApplication || ApplicationId.Length > 0;
+    public string Description => IsWebApplication ? "Веб-приложение · " + ExecutablePath : ApplicationId.Length > 0 ? "Microsoft Store / MSIX" : "";
+    public string RouteHint => IsWebApplication ? "Правило сайта «" + ExecutablePath + "» действует также в обычных вкладках браузера." : ExecutablePath;
+    public string DeleteLabel => "Удалить из ручного списка: " + DisplayName;
     public string AccessibleName => DisplayName + " через VPN";
     private bool _isVpnEnabled;
     public bool IsVpnEnabled
@@ -31,11 +40,20 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
     public static IReadOnlyList<SimpleApplicationItem> BuildApplicationRows(
         IReadOnlyList<DiscoveredApplication> applications, IEnumerable<RoutingRegistryEntry> savedRules)
     {
-        var eligible = new HashSet<string>(applications.Select(item => item.ExecutablePath), StringComparer.OrdinalIgnoreCase);
-        var rules = savedRules.Where(item => item.Kind == RoutingTargetKind.Application && eligible.Contains(item.PrimaryValue)).ToArray();
-        var known = new HashSet<string>(rules.SelectMany(item => item.RelatedExecutables.Append(item.PrimaryValue)), StringComparer.OrdinalIgnoreCase);
-        return rules.Select(item => new SimpleApplicationItem { DisplayName = item.DisplayName, ExecutablePath = item.PrimaryValue, IsVpnEnabled = item.IsEnabled })
-            .Concat(applications.Where(item => !known.Contains(item.ExecutablePath)).Select(item => new SimpleApplicationItem { DisplayName = item.DisplayName, ExecutablePath = item.ExecutablePath }))
+        var eligible = new HashSet<string>(applications.Where(item => !item.IsWebApplication).Select(item => item.ExecutablePath), StringComparer.OrdinalIgnoreCase);
+        var identities = new HashSet<string>(applications.Select(item => item.ApplicationId).Where(id => id.Length > 0), StringComparer.OrdinalIgnoreCase);
+        var domains = applications.Where(item => item.IsWebApplication).Select(item => item.ExecutablePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // Keep active rules visible so a stricter discovery filter cannot hide a
+        // previously enabled route. Manual choices also survive automatic filtering.
+        var rules = savedRules.Where(item =>
+            (item.Kind == RoutingTargetKind.Application && (eligible.Contains(item.PrimaryValue) || identities.Contains(item.ApplicationId) || item.IsManuallyAdded || item.IsEnabled)) ||
+            (item.Kind == RoutingTargetKind.Website && (item.IsWebApplication || domains.Contains(item.PrimaryValue)))).ToArray();
+        var known = new HashSet<string>(rules.Where(item => item.Kind == RoutingTargetKind.Application).SelectMany(item => item.RelatedExecutables.Append(item.PrimaryValue)), StringComparer.OrdinalIgnoreCase);
+        var knownIds = rules.Select(item => item.ApplicationId).Where(id => id.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var knownSites = rules.Where(item => item.Kind == RoutingTargetKind.Website).Select(item => item.PrimaryValue).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        return rules.Select(item => new SimpleApplicationItem { DisplayName = item.DisplayName, ExecutablePath = item.PrimaryValue, IsVpnEnabled = item.IsEnabled, RuleId = item.Id, IsManuallyAdded = item.IsManuallyAdded, IsWebApplication = item.Kind == RoutingTargetKind.Website, ApplicationId = item.ApplicationId, ExecutablePaths = item.RelatedExecutables })
+            .Concat(applications.Where(item => item.IsWebApplication ? !knownSites.Contains(item.ExecutablePath) : !known.Contains(item.ExecutablePath) && !knownIds.Contains(item.ApplicationId))
+                .Select(item => new SimpleApplicationItem { DisplayName = item.DisplayName, ExecutablePath = item.ExecutablePath, IsWebApplication = item.IsWebApplication, ApplicationId = item.ApplicationId, ExecutablePaths = item.ExecutablePaths }))
             .OrderBy(item => item.DisplayName, StringComparer.CurrentCultureIgnoreCase).ToArray();
     }
 
@@ -76,6 +94,7 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
     {
         InitializeComponent();
         ApplicationList.ItemsSource = Applications;
+        WebsiteList.ItemsSource = Websites;
         ProfileList.ItemsSource = Profiles;
     }
     public void SetTheme(AppTheme theme)
@@ -100,6 +119,7 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
         if (!_canEditProfiles) DeleteConfirmationPopup.IsOpen = false;
         RefreshProfileControls();
         ApplicationList.IsEnabled = ready && !busy;
+        RoutingControls.IsEnabled = ready && !busy;
         UpdateKeyHint();
     }
     public void SetMessage(string message, bool isError = false)

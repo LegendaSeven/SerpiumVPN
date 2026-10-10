@@ -13,6 +13,9 @@ public sealed record RoutingRegistryEntry
     public string DisplayName { get; init; } = string.Empty;
     public string PrimaryValue { get; init; } = string.Empty;
     public string[] RelatedExecutables { get; init; } = Array.Empty<string>();
+    public bool IsManuallyAdded { get; init; }
+    public bool IsWebApplication { get; init; }
+    public string ApplicationId { get; init; } = string.Empty;
     public bool IncludeSubdomains { get; init; }
     public bool IsEnabled { get; init; }
     public DateTimeOffset CreatedUtc { get; init; }

@@ -1,4 +1,4 @@
-﻿using System.ComponentModel;
+using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -43,7 +43,122 @@ public sealed class SecureRoutingRegistry
         _registryPath = Path.Combine(_registryDirectory, "routing.sroutes");
     }
 
+    internal SecureRoutingRegistry(string directory)
+    {
+        _registryDirectory = Path.GetFullPath(directory);
+        _registryPath = Path.Combine(_registryDirectory, "routing.sroutes");
+    }
+
+    internal async Task RestoreEntryAsync(RoutingRegistryEntry entry)
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            var entries = ReadEntries();
+            int index = entries.FindIndex(item => item.Id == entry.Id);
+            if (index < 0) { EnsureCapacity(entries); entries.Add(entry); }
+            else entries[index] = entry;
+            WriteEntries(entries);
+        }
+        finally { _gate.Release(); }
+    }
+
+    public async Task<RoutingRegistryEntry> AddManualApplicationAsync(string path, CancellationToken token = default)
+    {
+        var target = await ManualApplicationResolver.ResolveAsync(path, token).ConfigureAwait(false);
+        return await AddManualApplicationAsync(target, token).ConfigureAwait(false);
+    }
+
+    public Task<RoutingRegistryEntry> AddManualApplicationAsync(ManualApplicationTarget target, CancellationToken token = default) =>
+        SaveApplicationTargetAsync(target, false, true, token);
+
+    internal async Task<RoutingRegistryEntry> SaveApplicationTargetAsync(ManualApplicationTarget target, bool enabled, bool manuallyAdded, CancellationToken token = default)
+    {
+        if (target.UnsupportedReason.Length > 0) throw new InvalidOperationException(target.UnsupportedReason);
+        if (target.RequiresWebsiteAddress || target.RequiresRunningApplication)
+            throw new InvalidOperationException("Сначала укажите сайт или выберите запущенное приложение.");
+        RoutingRegistryEntry candidate;
+        if (target.IsWebApplication)
+        {
+            string domain = NormalizeDomain(target.PrimaryValue);
+            candidate = new RoutingRegistryEntry
+            {
+                Id = Guid.NewGuid(), Kind = RoutingTargetKind.Website, PrimaryValue = domain,
+                DisplayName = NormalizeDisplayName(target.DisplayName), IsWebApplication = true,
+                IsManuallyAdded = manuallyAdded, IncludeSubdomains = true, IsEnabled = enabled,
+                CreatedUtc = DateTimeOffset.UtcNow, UpdatedUtc = DateTimeOffset.UtcNow
+            };
+        }
+        else
+        {
+            string fullPath = NormalizeExecutablePath(target.PrimaryValue, requireExists: true);
+            InstalledApplicationDiscovery.ValidateManualApplication(fullPath, token);
+            if (target.ApplicationId.Length > 0)
+            {
+                if (!WindowsApplicationCatalog.IsPackageIdentity(target.ApplicationId)) throw new InvalidOperationException("Некорректный идентификатор приложения Windows.");
+                candidate = CreateApplicationEntry(target.DisplayName, fullPath,
+                    InstalledApplicationDiscovery.FilterManualExecutables(target.ExecutablePaths.Append(fullPath), token)) with
+                    { IsManuallyAdded = manuallyAdded, IsEnabled = enabled, ApplicationId = target.ApplicationId };
+            }
+            else
+            {
+                var bundle = new ApplicationBundleDiscoveryService().CreateInitial(fullPath);
+                candidate = CreateApplicationEntry(string.IsNullOrWhiteSpace(target.DisplayName) ? bundle.DisplayName : target.DisplayName,
+                    bundle.PrimaryExecutablePath, InstalledApplicationDiscovery.FilterManualExecutables(
+                        bundle.Candidates.Where(item => item.IsSelected).Select(item => item.ExecutablePath), token)) with
+                    { IsManuallyAdded = manuallyAdded, IsEnabled = enabled };
+            }
+        }
+        await _gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var entries = ReadEntries();
+            int index = entries.FindIndex(item => item.Kind == candidate.Kind &&
+                ((candidate.ApplicationId.Length > 0 && item.ApplicationId.Equals(candidate.ApplicationId, StringComparison.OrdinalIgnoreCase)) ||
+                 string.Equals(item.PrimaryValue, candidate.PrimaryValue, StringComparison.OrdinalIgnoreCase)));
+            if (index >= 0)
+            {
+                candidate = entries[index] with
+                {
+                    IsManuallyAdded = entries[index].IsManuallyAdded || manuallyAdded, IsWebApplication = candidate.IsWebApplication,
+                    DisplayName = candidate.DisplayName, UpdatedUtc = DateTimeOffset.UtcNow,
+                    ApplicationId = candidate.ApplicationId,
+                    PrimaryValue = candidate.PrimaryValue,
+                    RelatedExecutables = candidate.ApplicationId.Length > 0 ? candidate.RelatedExecutables : entries[index].RelatedExecutables
+                };
+                entries[index] = candidate;
+            }
+            else { EnsureCapacity(entries); entries.Add(candidate); }
+            WriteEntries(entries);
+            return candidate;
+        }
+        finally { _gate.Release(); }
+    }
+
     public string SafeLocation => @"%LOCALAPPDATA%\SerpiumVPN\Routing\routing.sroutes";
+
+    internal async Task<RoutingRegistryEntry> RefreshPackagedApplicationAsync(RoutingRegistryEntry original, ManualApplicationTarget target, CancellationToken token)
+    {
+        if (!WindowsApplicationCatalog.IsPackageIdentity(target.ApplicationId) ||
+            !(original.ApplicationId.Equals(target.ApplicationId, StringComparison.OrdinalIgnoreCase) ||
+              (original.ApplicationId.Length == 0 && original.PrimaryValue.Equals(target.PrimaryValue, StringComparison.OrdinalIgnoreCase))))
+            throw new InvalidOperationException("Идентификатор приложения изменился.");
+        var paths = InstalledApplicationDiscovery.FilterManualExecutables(target.ExecutablePaths.Append(target.PrimaryValue), token);
+        var replacement = CreateApplicationEntry(target.DisplayName, target.PrimaryValue, paths) with
+        {
+            Id = original.Id, ApplicationId = target.ApplicationId, IsManuallyAdded = original.IsManuallyAdded,
+            IsEnabled = original.IsEnabled, CreatedUtc = original.CreatedUtc
+        };
+        await _gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            var entries = ReadEntries(); int index = entries.FindIndex(item => item.Id == original.Id);
+            if (index < 0) throw new InvalidOperationException("Приложение уже удалено.");
+            replacement = replacement with { IsEnabled = entries[index].IsEnabled };
+            entries[index] = replacement; WriteEntries(entries); return replacement;
+        }
+        finally { _gate.Release(); }
+    }
 
     public async Task<IReadOnlyList<RoutingRegistryEntry>> ListAsync(
         CancellationToken cancellationToken = default)
@@ -294,19 +409,20 @@ public sealed class SecureRoutingRegistry
             throw new ArgumentException("Введите адрес сайта.", nameof(input));
 
         string value = input.Trim();
+        if (value.Length > 4096 || value.Any(char.IsControl) || value.Any(char.IsWhiteSpace))
+            throw new FormatException("Адрес содержит недопустимые символы или слишком длинный.");
         if (!value.Contains("://", StringComparison.Ordinal))
             value = "https://" + value;
 
         if (!Uri.TryCreate(value, UriKind.Absolute, out Uri? uri) ||
-            string.IsNullOrWhiteSpace(uri.Host))
+            string.IsNullOrWhiteSpace(uri.Host) ||
+            (uri.Scheme != Uri.UriSchemeHttps && uri.Scheme != Uri.UriSchemeHttp) ||
+            !string.IsNullOrEmpty(uri.UserInfo) || uri.HostNameType != UriHostNameType.Dns)
         {
             throw new FormatException("Не удалось распознать адрес сайта.");
         }
 
         string host = uri.Host.Trim().TrimEnd('.');
-        if (host.StartsWith("www.", StringComparison.OrdinalIgnoreCase))
-            host = host[4..];
-
         try
         {
             host = new IdnMapping().GetAscii(host).ToLowerInvariant();
@@ -316,7 +432,9 @@ public sealed class SecureRoutingRegistry
             throw new FormatException("Домен содержит недопустимые символы.");
         }
 
-        if (host.Length is < 1 or > 253 ||
+        if (!host.Contains('.') || host.EndsWith(".localhost", StringComparison.OrdinalIgnoreCase) ||
+            host.EndsWith(".local", StringComparison.OrdinalIgnoreCase) ||
+            host.Length is < 1 or > 253 ||
             host.Split('.').Any(label =>
                 label.Length is < 1 or > 63 ||
                 label.StartsWith('-') ||

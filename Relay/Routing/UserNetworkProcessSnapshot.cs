@@ -8,7 +8,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace SerpiumVPN.Relay.Routing;
 
-internal sealed record UserNetworkProcess(string Path, bool HasWindow, bool UsesInternet);
+internal sealed record UserNetworkProcess(string Path, bool HasWindow, bool UsesInternet, string ApplicationId = "");
 
 /// <summary>Reads endpoint ownership and window/process identity only; never captures packets.</summary>
 internal static class UserNetworkProcessSnapshot
@@ -52,11 +52,18 @@ internal static class UserNetworkProcessSnapshot
                 var name = new StringBuilder(32768);
                 int size = name.Capacity;
                 if (QueryFullProcessImageName(process,0,name,ref size))
-                    result.Add(new(name.ToString(),windows.Contains(pid),internet.Contains(pid) || engineObservedPaths?.Contains(name.ToString()) == true));
+                    result.Add(new(name.ToString(),windows.Contains(pid),internet.Contains(pid) || engineObservedPaths?.Contains(name.ToString()) == true, ReadApplicationId(process)));
             }
             catch (Exception error) when (error is Win32Exception or InvalidOperationException or UnauthorizedAccessException or ArgumentException or System.Security.SecurityException) { }
         }
         return result;
+    }
+
+    private static string ReadApplicationId(SafeProcessHandle process)
+    {
+        uint length = 261;
+        var value = new StringBuilder((int)length);
+        return GetApplicationUserModelId(process, ref length, value) == 0 && WindowsApplicationCatalog.IsPackageIdentity(value.ToString()) ? value.ToString() : "";
     }
 
     internal static HashSet<int> ReadInternetProcessIds()
@@ -139,6 +146,8 @@ internal static class UserNetworkProcessSnapshot
     private static extern bool ProcessIdToSessionId(int processId,out int sessionId);
     [DllImport("kernel32.dll",SetLastError=true)]
     private static extern SafeProcessHandle OpenProcess(uint access,[MarshalAs(UnmanagedType.Bool)] bool inherit,int processId);
+    [DllImport("kernel32.dll", CharSet=CharSet.Unicode)]
+    private static extern int GetApplicationUserModelId(SafeProcessHandle process, ref uint length, StringBuilder value);
     [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool QueryFullProcessImageName(SafeProcessHandle process,uint flags,StringBuilder name,ref int size);
     [DllImport("advapi32.dll",SetLastError=true)] [return: MarshalAs(UnmanagedType.Bool)]

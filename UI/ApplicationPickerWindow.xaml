@@ -1,0 +1,51 @@
+<Window x:Class="SerpiumVPN.UI.ApplicationPickerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Добавить приложение" Width="660" Height="620" MinWidth="560" MinHeight="480"
+        WindowStartupLocation="CenterOwner" ShowInTaskbar="False" Background="{DynamicResource Theme.Background}"
+        Foreground="{DynamicResource Theme.Text}" FontFamily="Segoe UI" FontSize="14" UseLayoutRounding="True">
+    <Window.Resources><ResourceDictionary>
+        <BooleanToVisibilityConverter x:Key="BooleanVisibility"/>
+        <ResourceDictionary.MergedDictionaries><ResourceDictionary Source="Themes/HomeControls.xaml"/></ResourceDictionary.MergedDictionaries>
+    </ResourceDictionary></Window.Resources>
+    <Grid Margin="22">
+        <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+        <TextBlock Text="Выберите приложение" FontSize="22" FontWeight="SemiBold" Margin="0,0,0,14"/>
+        <Grid Grid.Row="1">
+            <TextBox x:Name="SearchInput" Style="{StaticResource WebsiteInputStyle}" Padding="12,8" MinHeight="40" TextChanged="Search_Changed" AutomationProperties.Name="Поиск приложений" ToolTip="Поиск по названию приложения"/>
+            <TextBlock Text="Поиск по названию…" Foreground="{DynamicResource Theme.Muted}" Margin="12,0" VerticalAlignment="Center" IsHitTestVisible="False">
+                <TextBlock.Style><Style TargetType="TextBlock"><Setter Property="Visibility" Value="Collapsed"/><Style.Triggers><DataTrigger Binding="{Binding Text, ElementName=SearchInput}" Value=""><Setter Property="Visibility" Value="Visible"/></DataTrigger></Style.Triggers></Style></TextBlock.Style>
+            </TextBlock>
+        </Grid>
+        <Grid Grid.Row="2" Margin="0,10,0,10"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+            <StackPanel Orientation="Horizontal"><ToggleButton x:Name="InstalledTab" Content="Установленные" Style="{StaticResource RoutingTab}" IsChecked="True" Click="Tab_Click"/><ToggleButton x:Name="RunningTab" Content="Запущенные" Style="{StaticResource RoutingTab}" Margin="4,0,0,0" Click="Tab_Click"/></StackPanel>
+            <Button Grid.Column="1" x:Name="RefreshButton" Content="Обновить" Click="Refresh_Click" Padding="10,7" Margin="6,0"/>
+            <Button Grid.Column="2" x:Name="FileButton" Content="Из файла…" Click="File_Click" Padding="10,7"/>
+        </Grid>
+        <Border Grid.Row="3" Background="{DynamicResource Theme.Surface}" BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1" CornerRadius="14" Padding="8">
+            <Grid>
+                <ListBox x:Name="AppList" SelectionChanged="Selection_Changed" Background="Transparent" BorderThickness="0" Foreground="{DynamicResource Theme.Text}"
+                         ScrollViewer.HorizontalScrollBarVisibility="Disabled" VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling" AutomationProperties.Name="Найденные приложения">
+                    <ListBox.ItemContainerStyle><Style TargetType="ListBoxItem">
+                        <Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="10,8"/><Setter Property="Margin" Value="0,2"/>
+                        <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListBoxItem">
+                            <Border x:Name="SelectionBorder" Background="Transparent" BorderBrush="Transparent" BorderThickness="1" CornerRadius="10" Padding="{TemplateBinding Padding}"><ContentPresenter/></Border>
+                            <ControlTemplate.Triggers><Trigger Property="IsSelected" Value="True"><Setter TargetName="SelectionBorder" Property="Background" Value="{DynamicResource Theme.Secondary}"/><Setter TargetName="SelectionBorder" Property="BorderBrush" Value="{DynamicResource Theme.Focus}"/></Trigger><Trigger Property="IsMouseOver" Value="True"><Setter TargetName="SelectionBorder" Property="Background" Value="{DynamicResource Theme.Secondary}"/></Trigger></ControlTemplate.Triggers>
+                        </ControlTemplate></Setter.Value></Setter>
+                    </Style></ListBox.ItemContainerStyle>
+                    <ListBox.ItemTemplate><DataTemplate><StackPanel ToolTip="{Binding Target.PrimaryValue}">
+                        <TextBlock Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis"/>
+                        <TextBlock Text="{Binding Detail}" Foreground="{DynamicResource Theme.Muted}" FontSize="12" Margin="0,4,0,0" TextWrapping="Wrap"/>
+                    </StackPanel></DataTemplate></ListBox.ItemTemplate>
+                </ListBox>
+                <TextBlock x:Name="EmptyText" Text="Загружаем приложения…" TextWrapping="Wrap" Foreground="{DynamicResource Theme.Muted}" Margin="10" IsHitTestVisible="False"/>
+            </Grid>
+        </Border>
+        <StackPanel x:Name="WebsiteEditor" Grid.Row="4" Margin="0,10,0,0" Visibility="Collapsed">
+            <TextBlock Text="Адрес сайта этого веб-приложения" Margin="0,0,0,5"/>
+            <TextBox x:Name="WebsiteInput" Style="{StaticResource WebsiteInputStyle}" Padding="12,8" MinHeight="38" AutomationProperties.Name="Адрес сайта веб-приложения"/>
+        </StackPanel>
+        <TextBlock x:Name="Feedback" Grid.Row="5" Text="Службы Windows скрыты. Не нашли программу — запустите её и обновите список «Запущенные»." Foreground="{DynamicResource Theme.Muted}" TextWrapping="Wrap" FontSize="12" Margin="0,10,0,10" AutomationProperties.LiveSetting="Polite"/>
+        <StackPanel Grid.Row="6" Orientation="Horizontal" HorizontalAlignment="Right"><Button Content="Отмена" IsCancel="True" Padding="18,9" Margin="0,0,8,0"/><Button x:Name="AddButton" Content="Добавить" IsDefault="True" IsEnabled="False" Click="Add_Click" Padding="18,9" Background="{DynamicResource Theme.Accent}" Foreground="{DynamicResource Theme.OnAccent}"/></StackPanel>
+    </Grid>
+</Window>

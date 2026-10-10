@@ -52,6 +52,11 @@ public partial class MainWindow
         SimpleHome.ProfileSelectionRequested += SimpleProfileSelected;
         SimpleHome.ProfilesDeleteRequested += SimpleProfilesDeleteRequested;
         SimpleHome.ApplicationRouteRequested += SimpleApplicationRouteRequested;
+        SimpleHome.ManualApplicationAddRequested += SimpleManualApplicationAddRequested;
+        SimpleHome.ManualApplicationDeleteRequested += SimpleManualApplicationDeleteRequested;
+        SimpleHome.WebsiteAddRequested += SimpleWebsiteAddRequested;
+        SimpleHome.WebsiteRouteRequested += SimpleWebsiteRouteRequested;
+        SimpleHome.WebsiteDeleteRequested += id => SimpleDeleteRouteRequested(id, RoutingTargetKind.Website);
         _serpiumSingBoxSessionManager.ActiveConnectionsChanged += snapshot =>
             _simpleDiscovery.ObserveInternetApplications(snapshot.Connections.Where(connection => connection.UsesInternet).Select(connection => connection.ProcessPath));
         _simpleDiscoveryTimer.Tick += async (_, _) => await RefreshSimpleApplicationsAsync();
@@ -62,7 +67,7 @@ public partial class MainWindow
         try
         {
             // Reading again is intentional: a failed read must not be treated as an empty policy.
-            _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync()).Where(item => item.Kind == RoutingTargetKind.Application).ToArray();
+            _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync()).ToArray();
             _savedProfileEntries = await _secureProfileVault.ListProfilesAsync(_simpleLifetime.Token);
             _simpleProfileId = _simpleProfileSelection.Load(_savedProfileEntries.Select(item => item.Id));
             RenderSimpleProfiles();
@@ -134,6 +139,22 @@ public partial class MainWindow
             var discovered = await _simpleDiscovery.DiscoverAsync(_simpleLifetime.Token);
             if (_simpleLifetime.IsCancellationRequested) return;
             _simpleApplications = discovered;
+            if (!_simpleBusy)
+            {
+                foreach (var app in discovered.Where(item => item.ApplicationId.Length > 0))
+                {
+                    var original = _routingRegistryEntries.FirstOrDefault(item => item.Kind == RoutingTargetKind.Application &&
+                        (item.ApplicationId.Equals(app.ApplicationId, StringComparison.OrdinalIgnoreCase) ||
+                         (item.ApplicationId.Length == 0 && item.PrimaryValue.Equals(app.ExecutablePath, StringComparison.OrdinalIgnoreCase))));
+                    if (original is null) continue;
+                    var paths = app.ExecutablePaths.Append(app.ExecutablePath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    if (original.ApplicationId.Length > 0 && original.PrimaryValue.Equals(app.ExecutablePath, StringComparison.OrdinalIgnoreCase) && paths.SetEquals(original.RelatedExecutables.Append(original.PrimaryValue))) continue;
+                    bool changed = await ChangeSimpleRouteAsync(original,
+                        async () => await Task.Run(() => _secureRoutingRegistry.RefreshPackagedApplicationAsync(original, app.ToTarget(), _simpleLifetime.Token)),
+                        "Приложение обновилось. Выбор VPN сохранён.");
+                    if (!changed || _simpleLifetime.IsCancellationRequested) break;
+                }
+            }
             if (!_simpleBusy) RenderSimpleApplications();
         }
         catch (OperationCanceledException) { }
@@ -152,9 +173,10 @@ public partial class MainWindow
 
     private void RenderSimpleApplications()
     {
+        SimpleHome.SetWebsites(_routingRegistryEntries);
         var rows = SimpleHomeView.BuildApplicationRows(_simpleApplications, _routingRegistryEntries);
         // Do not disturb focus or scroll position during background discovery when nothing changed.
-        if (SimpleHome.Applications.Select(item => (item.ExecutablePath, item.DisplayName)).SequenceEqual(rows.Select(item => (item.ExecutablePath, item.DisplayName))))
+        if (SimpleHome.Applications.Select(item => (item.ExecutablePath, item.DisplayName, item.IsManuallyAdded, item.RuleId, item.IsWebApplication, item.ApplicationId, Paths: string.Join('|', item.ExecutablePaths))).SequenceEqual(rows.Select(item => (item.ExecutablePath, item.DisplayName, item.IsManuallyAdded, item.RuleId, item.IsWebApplication, item.ApplicationId, Paths: string.Join('|', item.ExecutablePaths)))))
         {
             for (int i = 0; i < rows.Count; i++) SimpleHome.Applications[i].IsVpnEnabled = rows[i].IsVpnEnabled;
         }
@@ -322,87 +344,6 @@ public partial class MainWindow
         cancellationToken.ThrowIfCancellationRequested();
         if (!SimpleConnected || _activeSavedProfileId != id)
             throw new ConnectionCheckException(ConnectionFailureKind.ProbeFailed);
-    }
-
-    private async void SimpleApplicationRouteRequested(ApplicationRouteRequest request)
-    {
-        if (_simpleBusy || !_simpleReady) return;
-        Guid? runningProfile = SimpleConnected ? _activeSavedProfileId : null;
-        var original = _routingRegistryEntries.FirstOrDefault(item => string.Equals(item.PrimaryValue, request.Application.ExecutablePath, StringComparison.OrdinalIgnoreCase));
-        Guid? changedId = original?.Id;
-        string[] affectedPaths = (original?.RelatedExecutables ?? []).Append(request.Application.ExecutablePath)
-            .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        bool persisted = false;
-        SetSimpleBusy(true, "Применение…");
-        try
-        {
-            if (original is null)
-            {
-                var bundle = await Task.Run(() => new ApplicationBundleDiscoveryService().CreateInitial(request.Application.ExecutablePath));
-                var added = await _secureRoutingRegistry.AddApplicationBundleAsync(bundle.DisplayName, bundle.PrimaryExecutablePath,
-                    bundle.Candidates.Where(item => item.IsSelected).Select(item => item.ExecutablePath));
-                changedId = added.Id;
-                affectedPaths = added.RelatedExecutables.Append(added.PrimaryValue).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-                persisted = true;
-                if (!request.Enabled && !await _secureRoutingRegistry.SetEnabledAsync(added.Id, false))
-                    throw new IOException("Application rule missing");
-            }
-            else
-            {
-                if (!await _secureRoutingRegistry.SetEnabledAsync(original.Id, request.Enabled)) throw new IOException("Application rule missing");
-                persisted = true;
-            }
-            _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync()).Where(item => item.Kind == RoutingTargetKind.Application).ToArray();
-            if (runningProfile.HasValue)
-            {
-                await ApplySimpleLiveApplicationRouteAsync(runningProfile.Value, affectedPaths, request.Enabled);
-            }
-            RenderSimpleApplications();
-            ShowSimpleConfirmation(request.Enabled ? "Добавлено" : "Убрано");
-        }
-        catch (Exception error)
-        {
-            LogSimpleFailure(error);
-            bool restored = true;
-            try
-            {
-                if (persisted && changedId.HasValue)
-                {
-                    if (original is null) await _secureRoutingRegistry.DeleteAsync(changedId.Value);
-                    else if (!await _secureRoutingRegistry.SetEnabledAsync(original.Id, original.IsEnabled)) throw new IOException("Rollback failed");
-                }
-                _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync()).Where(item => item.Kind == RoutingTargetKind.Application).ToArray();
-                if (runningProfile.HasValue && persisted)
-                {
-                    await ApplySimpleLiveApplicationRouteAsync(runningProfile.Value, affectedPaths, original?.IsEnabled == true);
-                }
-            }
-            catch (Exception rollbackError)
-            {
-                restored = false;
-                LogSimpleFailure(rollbackError);
-                await StopSimpleTransportsSafelyAsync();
-                try { _routingRegistryEntries = (await _secureRoutingRegistry.ListAsync()).Where(item => item.Kind == RoutingTargetKind.Application).ToArray(); }
-                catch { _simpleReady = false; }
-            }
-            RenderSimpleApplications();
-            _simpleWasConnected = SimpleConnected;
-            SimpleHome.SetMessage(restored ? "Не удалось применить. Прежний выбор сохранён." : "Не удалось применить настройки. Перезапустите приложение.", true);
-        }
-        finally { SetSimpleBusy(false); }
-    }
-
-    private async Task ApplySimpleLiveApplicationRouteAsync(Guid profileId, string[] paths, bool enabled)
-    {
-        if (!SimpleConnected || _activeSavedProfileId != profileId)
-            throw new InvalidOperationException("The connected profile changed during the application switch.");
-        var profile = _savedProfileEntries.FirstOrDefault(item => item.Id == profileId)
-            ?? throw new InvalidOperationException("The active profile is unavailable.");
-        var update = await _routingRuleSetRuntime.UpdateAsync(_routingRegistryEntries,
-            string.Equals(profile.Engine, "xray", StringComparison.OrdinalIgnoreCase), _simpleLifetime.Token);
-        await _serpiumSingBoxSessionManager.ApplySfpLivePolicyAsync(update.ActivationProbe, paths, enabled, _simpleLifetime.Token);
-        if (!SimpleConnected || _activeSavedProfileId != profileId)
-            throw new InvalidOperationException("The connection ended during the application switch.");
     }
 
     private async void ShowSimpleConfirmation(string message)
