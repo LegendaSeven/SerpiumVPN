@@ -28,6 +28,9 @@ if ($Phase -eq 'Source') {
     }
     foreach ($relative in $required) { if ($relative -cnotin $paths) { throw "Missing release file: $relative" } }
     foreach ($relative in $paths) {
+        if ($relative -match '(?i)(^|/)(Server|Tests|\.serpium-server|SubscriptionDevices|exports|revisions)(/|$)|\.(sdevice|svault|sroutes|pem|key|pfx|p12|py|pyc)$|(^|/)(state|config)\.json$') {
+            throw "Private server state or development tooling in release payload: $relative"
+        }
         if ($relative -match '(?i)(^|/)(Native|SerpiumNet|Plugins|Engines|SDK|tgws|wfp|logs|state|configs|cache|temp|tmp)(/|\.)|Serpium\.Engine|\.(pdb|log|tmp|sys|cat|inf)$|serpium\.runtime\.json|vendor_versions\.json') {
             throw "Unexpected release payload: $relative"
         }

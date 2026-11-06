@@ -12,6 +12,7 @@ public sealed class SerpiumParser
             new VmessKeyParser(),
             new TrojanKeyParser(),
             new Hysteria2KeyParser(),
+            new ShadowsocksKeyParser(),
             new AvoEnvelopeKeyParser()
         };
     }
@@ -28,7 +29,7 @@ public sealed class SerpiumParser
             string scheme = GetScheme(normalized);
             return SerpiumParseResult.Fail(
                 string.IsNullOrWhiteSpace(scheme)
-                    ? "Формат ключа не распознан. Сейчас поддерживаются VLESS, VMess, Trojan и провайдерские контейнеры."
+                    ? "Формат ключа не распознан. Сейчас поддерживаются VLESS, VMess, Trojan, Hysteria2, Outline и провайдерские контейнеры."
                     : $"Формат {scheme.ToUpperInvariant()} пока не поддерживается Serpium Parser.");
         }
 

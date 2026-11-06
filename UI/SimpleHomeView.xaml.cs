@@ -121,6 +121,7 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
         ApplicationList.IsEnabled = ready && !busy;
         RoutingControls.IsEnabled = ready && !busy;
         UpdateKeyHint();
+        RefreshOutlineControls();
     }
     public void SetMessage(string message, bool isError = false)
     {

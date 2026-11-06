@@ -53,6 +53,10 @@ public sealed class RelayComponentCompatibilityChecker
                 using var hy=Hysteria2ProfileFactory.Create(new SerpiumParser().Parse("hy2://compatibility-fixture@127.0.0.1?sni=example.test").Profile!);
                 using var compiled=SerpiumRoutingConfigCompiler.CompileProviderProfile(hy,entries,rules.RuleSetPath,applicationSelectionOnly:true);
                 await CheckConfigurationAsync(kind,executable,compiled.CopyConfiguration(),token);
+                using var outline=OutlineProfileFactory.Create(new SerpiumConnectionProfile
+                {Protocol="shadowsocks",Server="127.0.0.1",Port=8388,Encryption="chacha20-ietf-poly1305",Password="compatibility-fixture",Name="Outline"});
+                using var compiledOutline=SerpiumRoutingConfigCompiler.CompileProviderProfile(outline,entries,rules.RuleSetPath,applicationSelectionOnly:true);
+                await CheckConfigurationAsync(kind,executable,compiledOutline.CopyConfiguration(),token);
             }
             foreach(var entry in await _vault.ListProfilesAsync(token))
             {

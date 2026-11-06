@@ -4,6 +4,7 @@ using System.Windows.Threading;
 using SerpiumVPN.Relay;
 using SerpiumVPN.Relay.Diagnostics;
 using SerpiumVPN.Relay.Parser;
+using SerpiumVPN.Relay.Outline;
 using SerpiumVPN.Relay.ProfileVault;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Routing;
@@ -245,6 +246,20 @@ public partial class MainWindow
             else
             {
                 string key = SimpleHome.Key;
+                if (SimpleHome.IsOutlineAutoMode)
+                {
+                    string source = SimpleHome.OutlineSource;
+                    SetSimpleBusy(true, "Получение ключей Outline…");
+                    var keys = await Task.Run(() => new OutlineKeySource().ResolveAsync(source, cancellationToken), cancellationToken);
+                    var progress = new Progress<(int Index, int Total)>(step =>
+                    {
+                        if (cancellationToken.IsCancellationRequested || !_simpleBusy) return;
+                        _simpleActivity = $"Проверка ключа {step.Index} из {step.Total}…";
+                        UpdateSimpleConnectionState();
+                    });
+                    var probe = new OutlineCandidateProbe(Path.Combine(AppContext.BaseDirectory, "bin_files", "relay", "sing-box.exe"));
+                    key = await new OutlineAutoSelector().FindAsync(keys, probe.CheckAsync, progress, cancellationToken);
+                }
                 if (key.Length > 0)
                 {
                     if (key.TrimStart().StartsWith("https://", StringComparison.OrdinalIgnoreCase))
@@ -303,7 +318,9 @@ public partial class MainWindow
         // Key decoding, DPAPI and file ACL work must not block the Stop button.
         Guid firstProfile = await Task.Run(async () =>
         {
-            var keys = await new ConnectionKeySourceResolver().ResolveAsync(sourceKey, cancellationToken);
+            var keys = await new ConnectionKeySourceResolver(authorizeDevice: AuthorizeSubscriptionDeviceAsync,
+                readAuthorizedDevice: new SubscriptionDeviceIdentityStore().Read)
+                .ResolveAsync(sourceKey, cancellationToken);
             Guid? first = null;
             foreach (string key in keys)
             {
@@ -322,9 +339,10 @@ public partial class MainWindow
                 else
                 {
                     var profile = parsed.Profile ?? throw new ConnectionCheckException(ConnectionFailureKind.InvalidKey);
-                    if (profile.Protocol == "hysteria2")
+                    if (profile.Protocol is "hysteria2" or "shadowsocks")
                     {
-                        using var nativeProfile = Hysteria2ProfileFactory.Create(profile);
+                        using var nativeProfile = profile.Protocol == "shadowsocks"
+                            ? OutlineProfileFactory.Create(profile) : Hysteria2ProfileFactory.Create(profile);
                         imported = await _secureProfileVault.SaveProviderProfileAsync(nativeProfile, key, cancellationToken);
                     }
                     else imported = await _secureProfileVault.SaveXrayProfileAsync(profile, 10808, key, cancellationToken);

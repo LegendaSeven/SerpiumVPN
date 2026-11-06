@@ -200,3 +200,9 @@ Native/**/logs/
 /setup.inf
 /setup.rpt
 Native/**/backups/
+
+# Server administration state contains private keys and must never enter a release.
+**/.serpium-server/
+**/__pycache__/
+*.pyc
+*.sdevice

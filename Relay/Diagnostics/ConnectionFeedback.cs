@@ -9,7 +9,10 @@ public enum ConnectionFailureKind
     Unknown, InvalidKey, UnsupportedKey, ProfileUnavailable, AuthenticationRejected,
     NameResolution, ConnectionRefused, NetworkUnavailable, SecureHandshake, Timeout,
     ProbeUnavailable, ProbeFailed, EngineMissing, AdministratorRequired, InvalidConfiguration,
-    SubscriptionUnavailable, SubscriptionExpired, SubscriptionInvalid, SubscriptionTooLarge, SubscriptionTimeout
+    SubscriptionUnavailable, SubscriptionExpired, SubscriptionInvalid, SubscriptionTooLarge, SubscriptionTimeout,
+    OutlineSourceNeedsManual, OutlineNoWorkingKey,
+    SubscriptionDeviceRequired, SubscriptionDeviceLimit, SubscriptionClientRejected,
+    SubscriptionProviderNotice, SubscriptionDeviceStorage
 }
 
 /// <summary>Only fixed, user-safe messages cross the connection/UI boundary.</summary>
@@ -69,12 +72,19 @@ public static class ConnectionFeedback
     public static string Message(ConnectionFailureKind kind) => kind switch
     {
         ConnectionFailureKind.InvalidKey => "Ключ повреждён или имеет неверный формат. Скопируйте его целиком и попробуйте снова.",
-        ConnectionFailureKind.UnsupportedKey => "Этот тип ключа пока не поддерживается. Нужен ключ VLESS, VMess, Trojan, Hysteria2, AVO или HTTPS-ссылка на подписку.",
+        ConnectionFailureKind.UnsupportedKey => "Этот тип ключа пока не поддерживается. Нужен ключ VLESS, VMess, Trojan, Hysteria2, AVO, обычный Outline (ss://) или ссылка на подписку. Расширенные варианты Outline пока не поддерживаются.",
+        ConnectionFailureKind.OutlineSourceNeedsManual => "Источник не отдал подходящие ключи Outline. Если на странице есть вход или капча, получите ключ вручную либо укажите прямую ссылку на список ключей.",
+        ConnectionFailureKind.OutlineNoWorkingKey => "Рабочий ключ Outline не найден за отведённое время. Обновите источник или добавьте свой ключ вручную.",
         ConnectionFailureKind.SubscriptionUnavailable => "Не удалось загрузить профили по ссылке. Проверьте интернет и доступность сервиса подписки.",
         ConnectionFailureKind.SubscriptionExpired => "Ссылка недоступна или срок её действия истёк. Запросите актуальную ссылку у провайдера.",
         ConnectionFailureKind.SubscriptionInvalid => "По ссылке не получен поддерживаемый список подключений. Нужна ссылка на подписку, а не на веб-страницу.",
         ConnectionFailureKind.SubscriptionTooLarge => "Список подключений превышает допустимый размер. Запросите меньшую подписку.",
         ConnectionFailureKind.SubscriptionTimeout => "Сервис подписки не ответил вовремя. Проверьте интернет и повторите попытку.",
+        ConnectionFailureKind.SubscriptionDeviceRequired => "Провайдер требует привязку устройства. Разрешите передачу идентификатора Serpium при добавлении ссылки или запросите подписку без привязки.",
+        ConnectionFailureKind.SubscriptionDeviceLimit => "Достигнут лимит устройств в подписке. Удалите старое устройство в кабинете провайдера или обратитесь в его поддержку.",
+        ConnectionFailureKind.SubscriptionClientRejected => "Провайдер не разрешает эту подписку в Serpium. Запросите разрешение для SerpiumVPN или обычную ссылку VLESS/Outline у провайдера.",
+        ConnectionFailureKind.SubscriptionProviderNotice => "Вместо серверов провайдер прислал служебное сообщение. Проверьте состояние подписки в его личном кабинете.",
+        ConnectionFailureKind.SubscriptionDeviceStorage => "Не удалось прочитать или сохранить привязку устройства. Новый идентификатор не создан. Проверьте доступ к данным Serpium.",
         ConnectionFailureKind.ProfileUnavailable => "Не удалось прочитать сохранённый профиль. Вставьте ключ заново.",
         ConnectionFailureKind.AuthenticationRejected => "VPN-сервер отклонил данные доступа. Запросите актуальный ключ у провайдера.",
         ConnectionFailureKind.NameResolution => "Не удалось определить адрес сервера или проверочного сайта. Проверьте интернет и DNS.",

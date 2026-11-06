@@ -1,4 +1,4 @@
-﻿using System.Security.Cryptography;
+using System.Security.Cryptography;
 using System.Text;
 
 namespace SerpiumVPN.Relay.Parser;
@@ -53,7 +53,8 @@ public static class EncodedKeyEnvelopeDecoder
         "trojan://",
         "avo://",
         "hysteria2://",
-        "hy2://"
+        "hy2://",
+        "ss://"
     ];
 
     public static EncodedKeyEnvelopeDecodeResult Decode(string? input)

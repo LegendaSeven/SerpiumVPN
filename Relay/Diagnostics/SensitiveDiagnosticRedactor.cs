@@ -1,4 +1,4 @@
-﻿using System.Net;
+using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -14,7 +14,7 @@ public static class SensitiveDiagnosticRedactor
     private const int MaximumSafeLabelLength = 96;
 
     private static readonly Regex KeyUriRegex = new(
-        @"(?i)\b(vless|vmess|trojan|avo|hysteria2|hy2|https?)://[^\s""'<>]+",
+        @"(?i)\b(vless|vmess|trojan|avo|hysteria2|hy2|ss|ssconf|https?)://[^\s""'<>]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex LongEncodedTokenRegex = new(
@@ -27,6 +27,10 @@ public static class SensitiveDiagnosticRedactor
 
     private static readonly Regex AuthorizationRegex = new(
         @"(?i)\b(Bearer|Basic)\s+[^\s,""'<>]+",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    private static readonly Regex DeviceIdentityRegex = new(
+        @"(?i)(\b(?:x-hwid|hwid)\s*[:=]\s*)[A-Za-z0-9=-]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex UuidRegex = new(
@@ -43,6 +47,7 @@ public static class SensitiveDiagnosticRedactor
             return string.Empty;
 
         string redacted = AuthorizationRegex.Replace(value, "$1 [СКРЫТО]");
+        redacted = DeviceIdentityRegex.Replace(redacted, "$1[СКРЫТО]");
         redacted = KeyUriRegex.Replace(
             redacted,
             match => match.Groups[1].Value.ToUpperInvariant() + "://[СКРЫТО]");
@@ -154,6 +159,8 @@ public static class SensitiveDiagnosticRedactor
             "avo://",
             "hysteria2://",
             "hy2://",
+            "ss://",
+            "ssconf://",
             "https://",
             "http://"
         })

@@ -1,0 +1,261 @@
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Http;
+using System.Net.Sockets;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using System.Windows;
+using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
+using System.Windows.Media.Imaging;
+using System.Xml.Linq;
+using SerpiumVPN.Relay.Diagnostics;
+using SerpiumVPN.Relay.Outline;
+using SerpiumVPN.Relay.Parser;
+using SerpiumVPN.Relay.ProfileVault;
+using SerpiumVPN.Relay.Providers;
+using SerpiumVPN.Relay.Routing;
+using SerpiumVPN.UI;
+
+internal static class Program
+{
+    private static int count;
+    private static readonly string Key = MakeKey("example-password");
+    private static string MakeKey(string password, string endpoint = "example.test:8388") =>
+        "ss://" + Convert.ToBase64String(Encoding.UTF8.GetBytes("chacha20-ietf-poly1305:" + password)).TrimEnd('=').Replace('+', '-').Replace('/', '_') + "@" + endpoint + "/?outline=1#Test";
+    private static void Check(bool condition, string label)
+    { if (!condition) throw new Exception("FAILED: " + label); count++; Console.WriteLine("PASS " + label); }
+    private static async Task Fails(Func<Task> action, ConnectionFailureKind kind, string label)
+    {
+        try { await action(); throw new Exception("FAILED: " + label); }
+        catch (ConnectionCheckException error) { Check(error.Kind == kind, label); }
+    }
+
+    [STAThread]
+    private static int Main(string[] args)
+    {
+        string output = Path.GetFullPath(args[0]); Directory.CreateDirectory(output);
+        try
+        {
+            RunAsync(output, Path.GetFullPath(args[1])).GetAwaiter().GetResult();
+            CheckUi(output, Path.GetFullPath(args[1]));
+            File.WriteAllText(Path.Combine(output, "result.txt"), "OUTLINE_CHECKS_PASS=" + count);
+            Console.WriteLine("OUTLINE_CHECKS_PASS=" + count); return 0;
+        }
+        catch (Exception error) { Console.Error.WriteLine(SensitiveDiagnosticRedactor.RedactText(error.ToString())); return 1; }
+    }
+
+    private static async Task RunAsync(string output, string engine)
+    {
+        var parser = new SerpiumParser();
+        var parsed = parser.Parse(Key);
+        Check(parsed.Success && parsed.Profile?.Encryption == "chacha20-ietf-poly1305" && parsed.Profile.Password == "example-password", "SIP002 Outline fields");
+        foreach (string method in new[] { "aes-128-gcm", "aes-192-gcm", "aes-256-gcm", "chacha20-ietf-poly1305" })
+            Check(parser.Parse("ss://" + Convert.ToBase64String(Encoding.UTF8.GetBytes(method + ":test")) + "@example.test:1234").Success, method);
+        Check(parser.Parse("ss://" + Convert.ToBase64String(Encoding.UTF8.GetBytes("aes-256-gcm:legacy@example.test:8388")) + "#Legacy").Success, "legacy Base64 key");
+        Check(parser.Parse("ss://aes-256-gcm:hello%3Awith%40separators@example.test:1234").Profile?.Password == "hello:with@separators", "escaped credentials");
+        Check(parser.Parse(MakeKey("test", "[2001:db8::1]:8388")).Profile?.Server == "2001:db8::1", "IPv6 server");
+        Check(ConnectionKeySourceResolver.ParseKeys(Convert.ToBase64String(Encoding.UTF8.GetBytes(Key))).Count == 1, "encoded subscription import");
+        foreach (string suffix in new[] { "&plugin=v2ray-plugin", "&prefix=POST", "&unknown=1" })
+            Check(!parser.Parse(Key.Replace("#Test", suffix)).Success, "unsupported transport rejected " + suffix.Split('=')[0]);
+        foreach (string key in new[] { "ss://bad", "ss://aes-256-gcm:@example.test:12", "ss://aes-256-gcm:secret@example.test:0", "ss://aes-256-gcm:secret@example.test:65536", "ss://aes-256-gcm:secret@example.test:8388/path", "ss://rc4:secret@example.test:12", "ss://!!!!@example.test:12" })
+            Check(!parser.Parse(key).Success, "invalid Outline key rejected");
+        Check(SensitiveDiagnosticRedactor.RedactText(Key + " ssconf://example.test/private-token").Contains("[СКРЫТО]") &&
+            !SensitiveDiagnosticRedactor.RedactText(Key + " ssconf://example.test/private-token").Contains("private-token"), "Outline diagnostics redact both schemes");
+        string json = "{\"server\":\"example.test\",\"server_port\":8388,\"method\":\"aes-256-gcm\",\"password\":\"test\"}";
+        Check(ConnectionKeySourceResolver.ParseKeys(json).Count == 1, "JSON dynamic config import");
+        var keys = OutlineKeySource.ExtractCandidates("<script>" + Key + "</script><code>" + Key.Replace("outline=1", "outline=1") + "</code>\n" + Key);
+        Check(keys.Count == 1, "HTML extraction removes scripts and duplicates");
+        Check(OutlineKeySource.ExtractCandidates("<script>" + Key + "</script>").Count == 0, "scripts do not supply candidates");
+        string key2 = MakeKey("second-example");
+        Check(OutlineKeySource.ExtractCandidates(Key + "\n" + key2, true)[0] == key2, "newest Telegram candidates first");
+        Check(OutlineKeySource.ExtractCandidates(string.Join('\n', Enumerable.Range(0, 50).Select(i => MakeKey("example-" + i)))).Count == 8, "candidate cap");
+        Check(OutlineKeySource.ExtractCandidates(Convert.ToBase64String(Encoding.UTF8.GetBytes(Key))).Count == 1, "Base64 source list");
+        Check(OutlineKeySource.ExtractCandidates("////").Count == 0, "invalid UTF8 source rejected without decoder exception");
+        Check(OutlineKeySource.SourceUri("https://t.me/example_channel").AbsolutePath == "/s/example_channel", "public channel normalization");
+        Check(OutlineKeySource.SourceUri("ssconf://example.test:8443/path?a=b#Name").AbsoluteUri == "https://example.test:8443/path?a=b", "dynamic URL preserves path and query, strips fragment");
+        foreach (string ip in new[] { "127.0.0.1", "10.0.0.1", "192.168.0.1", "169.254.169.254", "172.16.1.1", "100.64.0.1", "224.0.0.1", "::1", "::", "fc00::1", "fe80::1", "::ffff:127.0.0.1", "2002:7f00:1::", "64:ff9b::7f00:1" })
+            Check(!OutlineKeySource.IsPublicAddress(IPAddress.Parse(ip)), "nonpublic source blocked " + ip);
+        Check(OutlineKeySource.IsPublicAddress(IPAddress.Parse("1.1.1.1")) && OutlineKeySource.IsPublicAddress(IPAddress.Parse("2606:4700:4700::1111")), "public IPv4/IPv6 accepted");
+        foreach (string url in new[] { "http://example.test/", "file:///secret", "https://user:password@example.test/", "https://127.0.0.1/" })
+            await Fails(() => Task.FromResult(OutlineKeySource.SourceUri(url)), ConnectionFailureKind.SubscriptionInvalid, "unsafe source URI rejected");
+        using var http = new HttpClient(new StubHandler((request, token) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+        { Content = new StringContent(request.RequestUri!.AbsolutePath == "/json" ? json : Key) })));
+        var resolver = new OutlineKeySource(http);
+        Check((await resolver.ResolveAsync("https://example.test/keys", default)).Single() == Key, "source download");
+        Check(parser.Parse(await resolver.ResolveDynamicAsync("ssconf://example.test/json", default)).Success, "dynamic JSON download");
+        using var empty = new HttpClient(new StubHandler((r, t) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("<html>captcha</html>") })));
+        await Fails(() => new OutlineKeySource(empty).ResolveAsync("https://example.test/", default), ConnectionFailureKind.OutlineSourceNeedsManual, "captcha/empty source gives actionable failure");
+        using var redirect = new HttpClient(new StubHandler((r, t) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.Found) { Headers = { Location = new Uri("http://example.test/") } })));
+        await Fails(() => new OutlineKeySource(redirect).ResolveAsync("https://example.test/", default), ConnectionFailureKind.SubscriptionInvalid, "HTTPS downgrade rejected");
+        using var oversized = new HttpClient(new StubHandler((r, t) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(new string('a', 524289)) })));
+        await Fails(() => new OutlineKeySource(oversized).ResolveAsync("https://example.test/", default), ConnectionFailureKind.SubscriptionTooLarge, "source size cap");
+        int tries = 0;
+        var selector = new OutlineAutoSelector();
+        string winner = await selector.FindAsync([Key, Key, key2], (key, token) =>
+        { tries++; return key == key2 ? Task.CompletedTask : Task.FromException(new ConnectionCheckException(ConnectionFailureKind.ProbeFailed)); }, null, default);
+        Check(winner == key2 && tries == 2, "failed key skipped and first working key chosen");
+        await Fails(() => selector.FindAsync([Key], (k,t) => Task.FromException(new ConnectionCheckException(ConnectionFailureKind.ProbeFailed)), null, default), ConnectionFailureKind.OutlineNoWorkingKey, "all failed gives truthful status");
+        tries = 0;
+        await Fails(() => selector.FindAsync([Key,key2], (k,t) => { tries++; throw new ConnectionCheckException(ConnectionFailureKind.EngineMissing); }, null, default), ConnectionFailureKind.EngineMissing, "missing engine stops search");
+        Check(tries == 1, "infrastructure failure not retried per key");
+        using (var cancel = new CancellationTokenSource())
+        {
+            tries = 0;
+            try
+            {
+                await selector.FindAsync([Key,key2], async (key, token) => { tries++; cancel.Cancel(); await Task.Delay(1000, token); }, null, cancel.Token);
+                throw new Exception("Cancellation ignored");
+            }
+            catch (OperationCanceledException) { Check(tries == 1, "Stop cancels in-flight attempt and prevents next"); }
+        }
+        await Fails(() => new OutlineCandidateProbe(engine).CheckAsync(MakeKey("test", "127.0.0.1:8388"), default), ConnectionFailureKind.InvalidKey, "auto probe rejects private candidate before process launch");
+        using var runtime = OutlineProfileFactory.Create(parsed.Profile!);
+        var rules = new[] { new RoutingRegistryEntry { Kind = RoutingTargetKind.Application, PrimaryValue = Environment.ProcessPath!, IsEnabled = true } };
+        using var compiled = SerpiumRoutingConfigCompiler.CompileProviderProfile(runtime, rules, null, applicationSelectionOnly: true);
+        await EngineCheck(engine, runtime.CopyConfiguration());
+        await EngineCheck(engine, compiled.CopyConfiguration());
+        await CheckLoopbackAsync(engine);
+        var vault = new SecureProfileVault();
+        string vaultDir = Path.Combine(output, "isolated-vault");
+        typeof(SecureProfileVault).GetField("_vaultDirectory", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(vault, vaultDir);
+        typeof(SecureProfileVault).GetField("_vaultPath", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(vault, Path.Combine(vaultDir, "profiles.svault"));
+        var saved = await vault.SaveProviderProfileAsync(runtime, Key);
+        using var reopened = await vault.OpenProviderProfileAsync(saved.Entry.Id);
+        Check(runtime.CopyConfiguration().SequenceEqual(reopened.CopyConfiguration()), "encrypted Outline profile round trip");
+        var again = await vault.SaveProviderProfileAsync(runtime, Key);
+        Check(again.Entry.Id == saved.Entry.Id && (await vault.ListProfilesAsync()).Count == 1, "profile deduplication");
+        Check(!Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(vaultDir, "profiles.svault"))).Contains("example-password"), "secret absent from plaintext vault");
+    }
+
+    private static async Task EngineCheck(string engine, byte[] config)
+    {
+        var info = new ProcessStartInfo(engine) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardError = true, RedirectStandardOutput = true };
+        foreach (string arg in new[] { "check", "-c", "stdin" }) info.ArgumentList.Add(arg);
+        using var process = Process.Start(info)!;
+        var stdout = process.StandardOutput.ReadToEndAsync(); var stderr = process.StandardError.ReadToEndAsync();
+        await process.StandardInput.BaseStream.WriteAsync(config); process.StandardInput.Close();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        if (process.ExitCode != 0) throw new Exception(SensitiveDiagnosticRedactor.RedactText(await stderr));
+        await stdout; await stderr;
+        Check(process.ExitCode == 0, "bundled sing-box accepts Outline configuration");
+    }
+
+    private static async Task CheckLoopbackAsync(string engine)
+    {
+        int FreePort() { using var socket = new TcpListener(IPAddress.Loopback, 0); socket.Start(); return ((IPEndPoint)socket.LocalEndpoint).Port; }
+        int ssPort = FreePort(), proxyPort = FreePort();
+        var serverConfig = new JsonObject
+        {
+            ["log"] = new JsonObject { ["disabled"] = true },
+            ["inbounds"] = new JsonArray(new JsonObject { ["type"] = "shadowsocks", ["listen"] = "127.0.0.1", ["listen_port"] = ssPort, ["method"] = "chacha20-ietf-poly1305", ["password"] = "loopback-fixture" }),
+            ["outbounds"] = new JsonArray(new JsonObject { ["type"] = "direct", ["tag"] = "direct" }), ["route"] = new JsonObject { ["final"] = "direct" }
+        };
+        var profile = new SerpiumParser().Parse(MakeKey("loopback-fixture", "127.0.0.1:" + ssPort)).Profile!;
+        var clientConfig = (JsonObject)typeof(OutlineCandidateProbe).GetMethod("BuildProbeConfiguration", BindingFlags.Static | BindingFlags.NonPublic)!
+            .Invoke(null, [profile, IPAddress.Loopback, proxyPort, "probe-fixture"])!;
+        Check(!clientConfig.ToJsonString().Contains("tun") && clientConfig["route"]!["final"]!.GetValue<string>() == "proxy", "probe configuration uses proxy without TUN or direct fallback");
+        var processes = new List<Process>();
+        var drains = new List<Task<string>>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        using var httpServer = new TcpListener(IPAddress.Loopback, 0); httpServer.Start();
+        int targetPort = ((IPEndPoint)httpServer.LocalEndpoint).Port;
+        try
+        {
+            foreach (var configuration in new[] { serverConfig, clientConfig })
+            {
+                var info = new ProcessStartInfo(engine) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true };
+                foreach (string argument in new[] { "run", "-c", "stdin" }) info.ArgumentList.Add(argument);
+                var process = Process.Start(info)!; processes.Add(process);
+                drains.Add(process.StandardOutput.ReadToEndAsync()); drains.Add(process.StandardError.ReadToEndAsync());
+                await process.StandardInput.WriteAsync(configuration.ToJsonString()); process.StandardInput.Close();
+            }
+            foreach (int port in new[] { ssPort, proxyPort })
+            {
+                while (true)
+                {
+                    try { using var socket = new TcpClient(); await socket.ConnectAsync(IPAddress.Loopback, port, deadline.Token); break; }
+                    catch (SocketException) { await Task.Delay(100, deadline.Token); }
+                }
+            }
+            Task serve = Task.Run(async () =>
+            {
+                using var socket = await httpServer.AcceptTcpClientAsync(deadline.Token);
+                using var reader = new StreamReader(socket.GetStream(), leaveOpen: true);
+                string? line;
+                while (!string.IsNullOrEmpty(line = await reader.ReadLineAsync(deadline.Token))) { }
+                await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes("HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"), deadline.Token);
+            });
+            using var client = new HttpClient(new HttpClientHandler
+            {
+                UseProxy = true, Proxy = new WebProxy("socks5://127.0.0.1:" + proxyPort) { Credentials = new NetworkCredential("probe", "probe-fixture") },
+                UseCookies = false, AllowAutoRedirect = false
+            });
+            using var response = await client.GetAsync("http://127.0.0.1:" + targetPort + "/", deadline.Token);
+            await serve;
+            Check(response.StatusCode == HttpStatusCode.NoContent, "probe proxy sends traffic through real Shadowsocks loopback server");
+            using var unauthorized = new HttpClient(new HttpClientHandler { UseProxy = true, Proxy = new WebProxy("socks5://127.0.0.1:" + proxyPort), AllowAutoRedirect = false });
+            try { using var rejected = await unauthorized.GetAsync("http://127.0.0.1:" + targetPort + "/", deadline.Token); throw new Exception("Unauthorized proxy accepted"); }
+            catch (HttpRequestException) { Check(true, "test proxy rejects other local clients without credential"); }
+        }
+        finally
+        {
+            deadline.Cancel();
+            foreach (var process in processes)
+            {
+                if (!process.HasExited) process.Kill(true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3));
+                process.Dispose();
+            }
+            await Task.WhenAll(drains);
+        }
+    }
+
+    private static void CheckUi(string output, string engine)
+    {
+        var app = new Application();
+        string project = Directory.GetParent(Path.GetDirectoryName(engine)!)!.Parent!.FullName;
+        var dictionary = XDocument.Load(Path.Combine(project, "App.xaml")).Descendants(XName.Get("ResourceDictionary", "http://schemas.microsoft.com/winfx/2006/xaml/presentation")).First();
+        app.Resources = (ResourceDictionary)System.Windows.Markup.XamlReader.Parse(dictionary.ToString());
+        var view = new SimpleHomeView();
+        var id = Guid.NewGuid();
+        view.SetProfiles([new SimpleProfileItem(id, "Outline · Test")], id);
+        view.SetConnectionState(false, false, true, true);
+        var key = (PasswordBox)view.FindName("KeyInput");
+        var connect = (Button)view.FindName("ConnectButton");
+        var auto = (ToggleButton)view.FindName("AutoConnectionMode");
+        Check(!key.IsEnabled, "saved profile still locks manual key input");
+        auto.RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent));
+        Check(view.IsOutlineAutoMode && ((FrameworkElement)view.FindName("ProfilesPanel")).Visibility == Visibility.Collapsed, "auto mode replaces manual controls");
+        Check(connect.Content?.ToString() == "Подобрать и подключиться", "auto action label");
+        view.SetConnectionState(false, true, true, true, "Проверка ключа 1 из 8…", canStop: true);
+        Check(connect.IsEnabled && connect.Content?.ToString() == "Стоп" && !auto.IsEnabled, "Stop available during probe, modes locked");
+        view.SetConnectionState(true, false, true, true);
+        Check(view.IsOutlineAutoMode && connect.Content?.ToString() == "Отключить" && !auto.IsEnabled, "auto mode persists during connection");
+        view.SetConnectionState(false, false, true, true);
+        Check(view.IsOutlineAutoMode && connect.Content?.ToString() == "Подобрать и подключиться", "next auto connection will fetch fresh candidates");
+        foreach (var theme in new[] { AppTheme.Midnight, AppTheme.SoftPink })
+        {
+            AppThemes.Apply(view.Resources, theme); view.SetTheme(theme);
+            Render(view, Path.Combine(output, "auto-" + theme + ".png"));
+        }
+        view.ShowManualConnectionMode();
+        Check(!view.IsOutlineAutoMode && !key.IsEnabled && connect.Content?.ToString() == "Подключиться", "manual mode restored with profile selection");
+        Render(view, Path.Combine(output, "manual.png"));
+        app.Shutdown();
+    }
+
+    private static void Render(FrameworkElement view, string path)
+    {
+        view.Measure(new Size(1080, 700)); view.Arrange(new Rect(0, 0, 1080, 700)); view.UpdateLayout();
+        var image = new RenderTargetBitmap(1080, 700, 96, 96, System.Windows.Media.PixelFormats.Pbgra32); image.Render(view);
+        var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(image));
+        using var stream = File.Create(path); encoder.Save(stream);
+    }
+
+    private sealed class StubHandler(Func<HttpRequestMessage, CancellationToken, Task<HttpResponseMessage>> send) : HttpMessageHandler
+    { protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken) => send(request, cancellationToken); }
+}

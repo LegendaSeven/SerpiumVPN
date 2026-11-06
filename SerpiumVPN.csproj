@@ -8,14 +8,23 @@
     <UseWindowsForms>true</UseWindowsForms>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <ApplicationIcon>Assets\Serpium.App.ico</ApplicationIcon>
-    <AssemblyVersion>1.0.56.13</AssemblyVersion>
-    <FileVersion>1.0.56.13</FileVersion>
-    <Version>1.0.56.13</Version>
-    <VersionPrefix>1.0.56.13</VersionPrefix>
-    <InformationalVersion>1.0.56.13</InformationalVersion>
+    <AssemblyVersion>1.0.56.14</AssemblyVersion>
+    <FileVersion>1.0.56.14</FileVersion>
+    <Version>1.0.56.14</Version>
+    <VersionPrefix>1.0.56.14</VersionPrefix>
+    <InformationalVersion>1.0.56.14</InformationalVersion>
   </PropertyGroup>
   <ItemGroup>
+    <None Remove="**\*.sdevice" />
+    <Content Remove="**\*.sdevice" />
+    <EmbeddedResource Remove="**\*.sdevice" />
+    <Compile Remove="**\.serpium-server\**" />
+    <None Remove="**\.serpium-server\**" />
+    <Content Remove="**\.serpium-server\**" />
+    <EmbeddedResource Remove="**\.serpium-server\**" />
+    <None Update="Server\**\*;Tests\**\*" CopyToOutputDirectory="Never" CopyToPublishDirectory="Never" />
     <Compile Remove="SerpiumUpdater\**\*.cs" />
+    <Compile Remove="Tests\**\*.cs" />
     <None Remove="SerpiumUpdater\**\*;Assets\Serpium.App.ico;Assets\Serpium.png" />
     <Resource Include="Assets\Serpium.App.ico;Assets\Serpium.png" />
     <!-- Keep the shortcut's file copy without registering this resource as WPF Content. -->
