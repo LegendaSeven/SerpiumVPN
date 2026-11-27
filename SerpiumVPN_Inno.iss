@@ -3,7 +3,7 @@
 
 #define MyAppName "SerpiumVPN"
 #ifndef MyAppVersion
-#define MyAppVersion "1.0.56.14"
+#define MyAppVersion "1.0.56.17"
 #endif
 #define MyAppPublisher "Serpium"
 #define ProjectRoot SourcePath

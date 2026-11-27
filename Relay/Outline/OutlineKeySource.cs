@@ -84,8 +84,8 @@ public sealed class OutlineKeySource
             try { decoded = ShadowsocksKeyParser.DecodeBase64(decoded); }
             catch (Exception error) when (error is FormatException or DecoderFallbackException) { return []; }
         }
-        var matches = Regex.Matches(decoded, @"\b(?:ss|ssconf)://[^\s<>""'`]+",
-            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)).Select(m => m.Value);
+        var matches = Regex.Matches(decoded, @"\b(?:ss\\?|ssconf)://[^\s<>""'`]+",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant, TimeSpan.FromSeconds(1)).Select(m => ShadowsocksKeyParser.NormalizeScheme(m.Value));
         if (newestFirst) matches = matches.Reverse();
         return matches.Where(k => k.Length <= 8192).Distinct(StringComparer.Ordinal).Take(MaximumCandidates).ToArray();
     }

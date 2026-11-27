@@ -10,7 +10,7 @@ internal static class UserApplicationPolicy
 {
     private static readonly HashSet<string> Infrastructure = new(StringComparer.OrdinalIgnoreCase)
     {
-        "serpiumvpn", "serpiumupdater", "serpiumnet", "xray", "sing-box", "tailscale", "tailscaled",
+        "serpiumvpn", "serpiumupdater", "serpium.outline", "serpiumnet", "xray", "sing-box", "tailscale", "tailscaled",
         "svchost", "services", "system", "registry", "explorer", "dwm", "lsass", "csrss", "smss",
         "wininit", "winlogon", "sihost", "taskhostw", "runtimebroker", "applicationframehost",
         "searchhost", "searchapp", "startmenuexperiencehost", "shellexperiencehost", "widgets",

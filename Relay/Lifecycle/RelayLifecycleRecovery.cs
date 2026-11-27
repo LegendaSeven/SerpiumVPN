@@ -16,7 +16,8 @@ public static class RelayLifecycleRecovery
     private static readonly string[] OwnedProcessNames =
     [
         "xray",
-        "sing-box"
+        "sing-box",
+        "Serpium.Outline"
     ];
 
     private static readonly string[] GeneratedRuntimeFiles =

@@ -13,6 +13,7 @@ public sealed class SerpiumConnectionProfile
     public string Name { get; init; } = string.Empty;
     public string UserId { get; init; } = string.Empty;
     public string Password { get; init; } = string.Empty;
+    public string OutlinePrefix { get; init; } = string.Empty;
     public int AlterId { get; init; }
     public string Encryption { get; init; } = "none";
 

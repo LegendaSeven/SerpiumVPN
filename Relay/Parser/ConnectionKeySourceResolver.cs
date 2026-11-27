@@ -60,6 +60,7 @@ public sealed class ConnectionKeySourceResolver
         try { decoded = EncodedKeyEnvelopeDecoder.Decode(source).NormalizedKey; }
         catch (FormatException) { throw new ConnectionCheckException(ConnectionFailureKind.InvalidKey); }
         var keys = decoded.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(ShadowsocksKeyParser.NormalizeScheme)
             .Distinct(StringComparer.Ordinal).ToArray();
         if (keys.Length is 0 or > 100)
             throw new ConnectionCheckException(ConnectionFailureKind.SubscriptionInvalid);

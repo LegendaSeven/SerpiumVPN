@@ -6,6 +6,7 @@ using System.Windows.Interop;
 using System.Windows.Threading;
 using SerpiumVPN.Relay;
 using SerpiumVPN.Relay.Components;
+using SerpiumVPN.Relay.Outline;
 using SerpiumVPN.Relay.Diagnostics;
 using SerpiumVPN.Relay.Lifecycle;
 using SerpiumVPN.Relay.Parser;
@@ -33,6 +34,7 @@ public partial class MainWindow : Window
     private readonly SerpiumSingBoxSessionManager _serpiumSingBoxSessionManager = new();
     private readonly SecureXraySessionManager _serpiumXraySessionManager = new();
     private readonly RelayComponentManager _relayComponentManager = new();
+    private readonly OutlinePrefixSession _outlinePrefixSession = new();
     private readonly DispatcherTimer _relayLifecycleTimer = new() { Interval = TimeSpan.FromSeconds(2) };
     private IReadOnlyList<RoutingRegistryEntry> _routingRegistryEntries = [];
     private IReadOnlyList<SecureProfileVaultEntry> _savedProfileEntries = [];
@@ -110,8 +112,11 @@ public partial class MainWindow : Window
             else
             {
                 using var saved = await _secureProfileVault.OpenProviderProfileAsync(profileId, cancellationToken);
+                using var prepared = await _outlinePrefixSession.PrepareAsync(saved,
+                    Path.Combine(relayDirectory, OutlinePrefixConfiguration.ExecutableName), cancellationToken);
                 _validatedProviderRuntimeProfile = SerpiumRoutingConfigCompiler.CompileProviderProfile(
-                    saved, _routingRegistryEntries, _routingRuleSetRuntime.RuleSetPath, applicationSelectionOnly: true);
+                    prepared, _routingRegistryEntries, _routingRuleSetRuntime.RuleSetPath,
+                    applicationSelectionOnly: true, managedTunId: profileId);
             }
             string singBox = Path.Combine(relayDirectory, "sing-box.exe");
             var check = await _singBoxValidationService.ValidateAsync(singBox, _validatedProviderRuntimeProfile, cancellationToken);
@@ -135,6 +140,7 @@ public partial class MainWindow : Window
         List<Exception> errors = [];
         try { await _serpiumSingBoxSessionManager.StopAsync(); } catch (Exception error) { errors.Add(error); }
         try { await _serpiumXraySessionManager.StopAsync(); } catch (Exception error) { errors.Add(error); }
+        try { await _outlinePrefixSession.StopAsync(); } catch (Exception error) { errors.Add(error); }
         try { await RelayLifecycleRecovery.CleanupOwnedRuntimeAsync(AppContext.BaseDirectory); }
         catch (Exception error) { errors.Add(error); }
         _activeSavedProfileId = null;
@@ -172,29 +178,6 @@ public partial class MainWindow : Window
             SimpleHome.SetMessage("Соединение прервано. Нажмите «Подключиться».", true);
         }
         finally { SetSimpleBusy(false); }
-    }
-
-    private async Task CheckAppUpdatesAsync()
-    {
-        try
-        {
-            var result = await _appUpdateManager.CheckDownloadAndApplyAsync(null, _simpleLifetime.Token);
-            if (result.Status != AppUpdateCheckStatus.ReadyToRestart || _simpleLifetime.IsCancellationRequested) return;
-            if (_simpleBusy || SimpleConnected) return;
-            if (System.Windows.MessageBox.Show(this, "Обновление Serpium готово. Установить и перезапустить?",
-                "Обновление", MessageBoxButton.YesNo, MessageBoxImage.Information) != MessageBoxResult.Yes) return;
-            // Reserve the UI before the first await so a new connection cannot race the restart.
-            _shutdownStarted = true;
-            await PrepareForExitAsync();
-            _isRealExit = _shutdownCompleted = true;
-            _appUpdateManager.RestartAndApply();
-        }
-        catch (OperationCanceledException) when (_simpleLifetime.IsCancellationRequested) { }
-        catch (Exception error)
-        {
-            LogSimpleFailure(error);
-            if (_shutdownStarted) { _isRealExit = _shutdownCompleted = true; Close(); }
-        }
     }
 
     private void SafeDispatcherInvoke(Action action)
@@ -266,6 +249,7 @@ public partial class MainWindow : Window
         _simpleDiscoveryTimer.Stop();
         _relayLifecycleTimer.Stop();
         _componentUpdateTimer.Stop();
+        _appUpdateTimer.Stop();
         _simpleLifetime.Cancel();
         _simpleConnectCancellation?.Cancel();
         SimpleHome.ClearKey();
@@ -274,10 +258,13 @@ public partial class MainWindow : Window
         if (_startupCompletion is { } startup) await startup.Task;
         if (_simpleDiscoveryCompletion is { } discovery) await discovery.Task;
         if (_componentCheckCompletion is { } components) await components.Task;
+        if (_appUpdateCompletion is { } appUpdate) await appUpdate.Task;
+        _appUpdateManager.Dispose();
         await StopSimpleTransportsSafelyAsync();
         _simpleDiscovery.Dispose();
         _serpiumSingBoxSessionManager.Dispose();
         _serpiumXraySessionManager.Dispose();
+        _outlinePrefixSession.Dispose();
         _relayComponentManager.Dispose();
         if (_trayIcon is { } tray)
         {

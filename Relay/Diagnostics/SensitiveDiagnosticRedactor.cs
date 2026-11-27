@@ -14,7 +14,7 @@ public static class SensitiveDiagnosticRedactor
     private const int MaximumSafeLabelLength = 96;
 
     private static readonly Regex KeyUriRegex = new(
-        @"(?i)\b(vless|vmess|trojan|avo|hysteria2|hy2|ss|ssconf|https?)://[^\s""'<>]+",
+        @"(?i)\b(vless|vmess|trojan|avo|hysteria2|hy2|ss|ssconf|https?)\\?://[^\s""'<>]+",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex LongEncodedTokenRegex = new(

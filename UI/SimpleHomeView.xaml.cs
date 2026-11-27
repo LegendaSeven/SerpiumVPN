@@ -66,8 +66,7 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
     {
         _componentUpdatesBusy=busy;_componentUpdatesAvailable=available;
         ComponentUpdateStatus.Text=busy ? "Проверяем компоненты…" : message;
-        UpdateBadge.Visibility=available ? Visibility.Visible : Visibility.Collapsed;
-        UpdatesMenuButton.ToolTip=message;
+        RefreshUpdateBadge();
         ComponentUpdateButton.Content=available?"Обновить компоненты":"Проверить обновления";
         RefreshComponentUpdateButton();
     }
@@ -80,7 +79,7 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
     private void UpdatesMenu_Click(object sender, RoutedEventArgs e)
     {
         ComponentUpdatesPopup.IsOpen = !ComponentUpdatesPopup.IsOpen;
-        if (ComponentUpdatesPopup.IsOpen) ComponentUpdateButton.Focus();
+        if (ComponentUpdatesPopup.IsOpen) ProgramUpdateButton.Focus();
     }
     private void Popup_KeyDown(object sender, System.Windows.Input.KeyEventArgs e)
     {
@@ -107,7 +106,7 @@ public partial class SimpleHomeView : System.Windows.Controls.UserControl
     private void Theme_Click(object sender, RoutedEventArgs e) => ThemeToggleRequested?.Invoke(this, EventArgs.Empty);
     public void SetConnectionState(bool connected, bool busy, bool ready, bool hasSavedKey, string? activity = null, bool canStop = false)
     {
-        _connected=connected;_connectionBusy=busy||!ready;RefreshComponentUpdateButton();
+        _connected=connected;_connectionBusy=busy||!ready;RefreshComponentUpdateButton();RefreshProgramUpdateButton();
         _hasSavedKey = hasSavedKey;
         ConnectionStatus.Text = busy ? activity ?? "Подключение…" : connected ? "Соединение активно" : "Не подключено";
         StatusDot.SetResourceReference(System.Windows.Shapes.Shape.FillProperty, connected && !busy ? "Theme.Success" : "Theme.Muted");

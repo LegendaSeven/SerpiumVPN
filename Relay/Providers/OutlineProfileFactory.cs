@@ -10,11 +10,15 @@ public static class OutlineProfileFactory
     public static JsonObject CreateOutbound(SerpiumConnectionProfile profile)
     {
         if (profile.Protocol != "shadowsocks") throw new ArgumentException("Expected Outline profile.");
-        return new JsonObject
+        ShadowsocksKeyParser.ValidatePrefix(profile.Encryption, profile.OutlinePrefix);
+        var outbound = new JsonObject
         {
             ["type"] = "shadowsocks", ["tag"] = "proxy", ["server"] = profile.Server,
             ["server_port"] = profile.Port, ["method"] = profile.Encryption, ["password"] = profile.Password
         };
+        if (profile.OutlinePrefix.Length > 0)
+            outbound[SerpiumVPN.Relay.Outline.OutlinePrefixConfiguration.Marker] = Convert.ToBase64String(Encoding.Latin1.GetBytes(profile.OutlinePrefix));
+        return outbound;
     }
 
     public static ProviderRuntimeProfile Create(SerpiumConnectionProfile profile)

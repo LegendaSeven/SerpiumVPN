@@ -40,7 +40,7 @@ internal sealed partial class SerpiumSingBoxValidationService
             executablePath,
             cancellationToken);
 
-        byte[] configurationUtf8 = runtimeProfile.CopyConfiguration();
+        byte[] configurationUtf8 = SerpiumVPN.Relay.Outline.OutlinePrefixConfiguration.PrepareCheck(runtimeProfile.CopyConfiguration());
         try
         {
             return await RunCheckAsync(

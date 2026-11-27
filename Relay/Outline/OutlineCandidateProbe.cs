@@ -21,6 +21,7 @@ public sealed class OutlineCandidateProbe(string executable)
         var profile = new ShadowsocksKeyParser().Parse(key).Profile ?? throw new ConnectionCheckException(ConnectionFailureKind.InvalidKey);
         Process? process = null;
         Task? stdout = null, stderr = null;
+        using var prefixSession = new OutlinePrefixSession();
         try
         {
             var addresses = await Dns.GetHostAddressesAsync(profile.Server, token);
@@ -32,6 +33,8 @@ public sealed class OutlineCandidateProbe(string executable)
             string secret = Convert.ToHexString(RandomNumberGenerator.GetBytes(24));
             var address = addresses.OrderBy(ip => ip.AddressFamily == AddressFamily.InterNetwork ? 0 : 1).First();
             var config = BuildProbeConfiguration(profile, address, port, secret);
+            await prefixSession.PrepareAsync(config,
+                Path.Combine(Path.GetDirectoryName(Path.GetFullPath(executable))!, OutlinePrefixConfiguration.ExecutableName), token);
             var info = new ProcessStartInfo(executable)
             {
                 UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = Path.GetDirectoryName(executable)!,
@@ -70,17 +73,24 @@ public sealed class OutlineCandidateProbe(string executable)
         { throw new ConnectionCheckException(ConnectionFailureKind.ProbeFailed); }
         finally
         {
-            if (process is not null)
+            try
             {
-                try
+                await prefixSession.StopAsync();
+            }
+            finally
+            {
+                if (process is not null)
                 {
-                    if (!process.HasExited) process.Kill(entireProcessTree: true);
-                    await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3));
-                    if (stdout is not null && stderr is not null) await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(2));
+                    try
+                    {
+                        if (!process.HasExited) process.Kill(entireProcessTree: true);
+                        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(3));
+                        if (stdout is not null && stderr is not null) await Task.WhenAll(stdout, stderr).WaitAsync(TimeSpan.FromSeconds(2));
+                    }
+                    catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or TimeoutException)
+                    { throw new ConnectionCheckException(ConnectionFailureKind.ProbeUnavailable); }
+                    finally { process.Dispose(); }
                 }
-                catch (Exception error) when (error is System.ComponentModel.Win32Exception or InvalidOperationException or TimeoutException)
-                { throw new ConnectionCheckException(ConnectionFailureKind.ProbeUnavailable); }
-                finally { process.Dispose(); }
             }
         }
     }

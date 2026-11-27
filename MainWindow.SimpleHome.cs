@@ -33,11 +33,13 @@ public partial class MainWindow
     private bool SimpleConnected => _activeSavedProfileId.HasValue &&
         _activeSavedProfileUsesRoutingTun && _serpiumSingBoxSessionManager.HasLiveProcess &&
         _serpiumSingBoxSessionManager.State == RelayGatewayState.Running &&
+        (!_outlinePrefixSession.Required || _outlinePrefixSession.IsRunning) &&
         (_validatedRelayProfile is null || (_serpiumXraySessionManager.HasLiveProcess && _serpiumXraySessionManager.State == RelayGatewayState.Running));
 
     private void InitializeSimpleHome()
     {
         InitializeSimpleComponentUpdates();
+        InitializeAppUpdates();
         try
         {
             _simpleConnectionLog = new(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"SerpiumVPN","Logs","connection-errors.log"));

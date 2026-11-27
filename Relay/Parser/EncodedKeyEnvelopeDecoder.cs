@@ -116,7 +116,7 @@ public static class EncodedKeyEnvelopeDecoder
     }
 
     private static string NormalizeText(string value) =>
-        value.Trim('\uFEFF', ' ', '\t', '\r', '\n');
+        ShadowsocksKeyParser.NormalizeScheme(value.Trim('\uFEFF', ' ', '\t', '\r', '\n'));
 
     private static string? TryGetSupportedScheme(string value)
     {

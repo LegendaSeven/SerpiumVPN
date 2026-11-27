@@ -53,7 +53,9 @@ public static class ConnectionFeedback
     {
         string text = diagnostic.ToLowerInvariant();
         if (text.Contains("от имени администратора")) return ConnectionFailureKind.AdministratorRequired;
-        if (text.Contains("sing-box отклонил")) return ConnectionFailureKind.InvalidConfiguration;
+        if (text.Contains("sing-box отклонил") || text.Contains("конфигурация sing-box") ||
+            text.Contains("tun-вход sing-box") || text.Contains("не найден tun-вход"))
+            return ConnectionFailureKind.InvalidConfiguration;
         if (text.Contains("authentication failed") || text.Contains("invalid user") || text.Contains("invalid password") ||
             text.Contains("authentication rejected") || text.Contains("authorization failed"))
             return ConnectionFailureKind.AuthenticationRejected;

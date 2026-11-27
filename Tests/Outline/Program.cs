@@ -18,6 +18,7 @@ using SerpiumVPN.Relay.Parser;
 using SerpiumVPN.Relay.ProfileVault;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Routing;
+using SerpiumVPN.Relay.SingBox;
 using SerpiumVPN.UI;
 
 internal static class Program
@@ -59,7 +60,7 @@ internal static class Program
         Check(parser.Parse("ss://aes-256-gcm:hello%3Awith%40separators@example.test:1234").Profile?.Password == "hello:with@separators", "escaped credentials");
         Check(parser.Parse(MakeKey("test", "[2001:db8::1]:8388")).Profile?.Server == "2001:db8::1", "IPv6 server");
         Check(ConnectionKeySourceResolver.ParseKeys(Convert.ToBase64String(Encoding.UTF8.GetBytes(Key))).Count == 1, "encoded subscription import");
-        foreach (string suffix in new[] { "&plugin=v2ray-plugin", "&prefix=POST", "&unknown=1" })
+        foreach (string suffix in new[] { "&plugin=v2ray-plugin", "&prefix=%ZZ", "&unknown=1" })
             Check(!parser.Parse(Key.Replace("#Test", suffix)).Success, "unsupported transport rejected " + suffix.Split('=')[0]);
         foreach (string key in new[] { "ss://bad", "ss://aes-256-gcm:@example.test:12", "ss://aes-256-gcm:secret@example.test:0", "ss://aes-256-gcm:secret@example.test:65536", "ss://aes-256-gcm:secret@example.test:8388/path", "ss://rc4:secret@example.test:12", "ss://!!!!@example.test:12" })
             Check(!parser.Parse(key).Success, "invalid Outline key rejected");
@@ -116,9 +117,12 @@ internal static class Program
         using var runtime = OutlineProfileFactory.Create(parsed.Profile!);
         var rules = new[] { new RoutingRegistryEntry { Kind = RoutingTargetKind.Application, PrimaryValue = Environment.ProcessPath!, IsEnabled = true } };
         using var compiled = SerpiumRoutingConfigCompiler.CompileProviderProfile(runtime, rules, null, applicationSelectionOnly: true);
+        CheckTunSession(compiled, "ordinary Outline reaches the real TUN session preflight");
         await EngineCheck(engine, runtime.CopyConfiguration());
         await EngineCheck(engine, compiled.CopyConfiguration());
         await CheckLoopbackAsync(engine);
+        await CheckPrefixAsync(output, engine);
+        await CheckProviderTunAsync(output, engine, rules);
         var vault = new SecureProfileVault();
         string vaultDir = Path.Combine(output, "isolated-vault");
         typeof(SecureProfileVault).GetField("_vaultDirectory", BindingFlags.Instance | BindingFlags.NonPublic)!.SetValue(vault, vaultDir);
@@ -129,6 +133,80 @@ internal static class Program
         var again = await vault.SaveProviderProfileAsync(runtime, Key);
         Check(again.Entry.Id == saved.Entry.Id && (await vault.ListProfilesAsync()).Count == 1, "profile deduplication");
         Check(!Encoding.UTF8.GetString(File.ReadAllBytes(Path.Combine(vaultDir, "profiles.svault"))).Contains("example-password"), "secret absent from plaintext vault");
+    }
+
+    private static async Task CheckPrefixAsync(string output, string engine)
+    {
+        const string encodedPrefix = "%16%03%01%00%C2%A8%01%01";
+        string key = Key.Replace("outline=1", "outline=1&prefix=" + encodedPrefix);
+        var parser = new SerpiumParser();
+        var profile = parser.Parse(key).Profile!;
+        Check(Convert.ToHexString(Encoding.Latin1.GetBytes(profile.OutlinePrefix)) == "16030100A80101", "Outline percent encoding maps UTF-8 codepoints to exact salt bytes");
+        Check(parser.Parse(key.Replace("ss://", "ss\\://")).Success, "Markdown-escaped ss scheme accepted");
+        Check(ConnectionKeySourceResolver.ParseKeys(key.Replace("ss://", "ss\\://")).Count == 1, "escaped scheme accepted through actual manual import pipeline");
+        Check(OutlineKeySource.ExtractCandidates(key.Replace("ss://", "ss\\://")).Count == 1, "auto source recognizes escaped prefix keys");
+        Check(!SensitiveDiagnosticRedactor.RedactText(key.Replace("ss://", "ss\\://")).Contains(key[5..key.IndexOf('@')]), "escaped key redacted from diagnostics");
+        Check(parser.Parse(Key.Replace("outline=1", "prefix=POST%20")).Profile!.OutlinePrefix == "POST ", "printable prefix preserved");
+        Check(parser.Parse(Key.Replace("outline=1", "prefix=%2B+")).Profile!.OutlinePrefix == "++", "plus stays a literal byte");
+        foreach (string invalid in new[] { "%A8", "%C2", "%GG", "%", "%E2%82%AC", new string('A',17), "ok&prefix=second" })
+            Check(!parser.Parse(Key.Replace("outline=1", "prefix=" + invalid)).Success, "invalid or overlong prefix rejected: " + invalid);
+        Check(!parser.Parse("ss://" + Convert.ToBase64String(Encoding.UTF8.GetBytes("aes-128-gcm:test")) + "@example.test:443?prefix=POST").Success, "prefix cannot consume salt entropy below 128 bits");
+        using var runtime = OutlineProfileFactory.Create(profile);
+        var vault = new SecureProfileVault(); string vaultDir = Path.Combine(output,"prefix-vault");
+        typeof(SecureProfileVault).GetField("_vaultDirectory",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(vault,vaultDir);
+        typeof(SecureProfileVault).GetField("_vaultPath",BindingFlags.Instance|BindingFlags.NonPublic)!.SetValue(vault,Path.Combine(vaultDir,"profiles.svault"));
+        var saved = await vault.SaveProviderProfileAsync(runtime,key);
+        using var reopened = await vault.OpenProviderProfileAsync(saved.Entry.Id);
+        Check(reopened.CopyConfiguration().SequenceEqual(runtime.CopyConfiguration()), "prefix and credentials survive encrypted profile round trip");
+        await EngineCheck(engine, OutlinePrefixConfiguration.PrepareCheck(reopened.CopyConfiguration()));
+        using (var session = new OutlinePrefixSession())
+        using (var prepared = await session.PrepareAsync(reopened, Path.Combine(Path.GetDirectoryName(engine)!, OutlinePrefixConfiguration.ExecutableName), default))
+        using (var routed = SerpiumRoutingConfigCompiler.CompileProviderProfile(prepared,
+            [new RoutingRegistryEntry { Kind = RoutingTargetKind.Application, PrimaryValue = Environment.ProcessPath!, IsEnabled = true }],
+            null, applicationSelectionOnly: true, managedTunId: saved.Entry.Id))
+        {
+            CheckTunSession(routed, "saved prefix profile gains a TUN without reimporting its key");
+            await EngineCheck(engine, routed.CopyConfiguration());
+            await session.StopAsync();
+        }
+        await CheckLoopbackAsync(engine, encodedPrefix);
+    }
+
+    private static async Task CheckProviderTunAsync(string output, string engine, RoutingRegistryEntry[] rules)
+    {
+        using var source = Hysteria2ProfileFactory.Create(new SerpiumConnectionProfile
+        { Protocol = "hysteria2", Server = "example.test", Port = 443, ServerName = "example.test", Password = "test-fixture", Name = "Fixture" });
+        Guid id = Guid.NewGuid();
+        using var compiled = SerpiumRoutingConfigCompiler.CompileProviderProfile(source, rules, null, true, id);
+        CheckTunSession(compiled, "Hysteria2 outbound-only profile reaches real TUN session preflight");
+        await EngineCheck(engine, compiled.CopyConfiguration());
+        byte[] sourceBytes = source.CopyConfiguration(), firstBytes = compiled.CopyConfiguration();
+        using var existing = SerpiumRoutingConfigCompiler.CompileProviderProfile(compiled, rules, null, true, Guid.NewGuid());
+        byte[] secondBytes = existing.CopyConfiguration();
+        try
+        {
+            Check(JsonNode.Parse(sourceBytes)!["inbounds"] is null, "runtime preparation leaves stored provider configuration unchanged");
+            var first = JsonNode.Parse(firstBytes)!["inbounds"]!;
+            var second = JsonNode.Parse(secondBytes)!["inbounds"]!;
+            Check(JsonNode.DeepEquals(first, second) && second.AsArray().Count == 1, "existing provider TUN is preserved without duplicate interfaces");
+        }
+        finally
+        {
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(sourceBytes);
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(firstBytes);
+            System.Security.Cryptography.CryptographicOperations.ZeroMemory(secondBytes);
+        }
+        await EngineCheck(engine, existing.CopyConfiguration());
+        Check(ConnectionFeedback.ClassifyDiagnostic("Конфигурация sing-box не содержит массив inbounds.") == ConnectionFailureKind.InvalidConfiguration,
+            "invalid runtime configuration is distinguished from an invalid key");
+        using var live = new SecureRoutingRuleSetRuntime(Path.Combine(output, "routing-fixture")) { FullTunnelWhenEmpty = false };
+        await live.UpdateAsync([], false);
+        using var idle = SerpiumRoutingConfigCompiler.CompileProviderProfile(source, [], live.RuleSetPath, true, id);
+        CheckTunSession(idle, "connection preflight works with every app toggle off and live rules ready");
+        await EngineCheck(engine, idle.CopyConfiguration());
+        using var xray = SerpiumRoutingConfigCompiler.BuildXrayBridgeProfile(Guid.NewGuid(), 10808, rules);
+        CheckTunSession(xray, "Xray bridge still passes the same TUN session preflight");
+        await EngineCheck(engine, xray.CopyConfiguration());
     }
 
     private static async Task EngineCheck(string engine, byte[] config)
@@ -144,7 +222,20 @@ internal static class Program
         Check(process.ExitCode == 0, "bundled sing-box accepts Outline configuration");
     }
 
-    private static async Task CheckLoopbackAsync(string engine)
+    private static void CheckTunSession(ProviderRuntimeProfile runtime, string label)
+    {
+        byte[] config = runtime.CopyConfiguration();
+        try
+        {
+            var validate = typeof(SerpiumSingBoxSessionManager).GetMethod("ReadAndValidateTunInterface", BindingFlags.Static | BindingFlags.NonPublic)!;
+            string? interfaceName = (string?)validate.Invoke(null, [config]);
+            Check(!string.IsNullOrWhiteSpace(interfaceName) && runtime.InboundCount > 0, label);
+            Check(VpnOutboundProbe.ReadOutboundTag(config) == "proxy", "session checks the actual VPN outbound");
+        }
+        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(config); }
+    }
+
+    private static async Task CheckLoopbackAsync(string engine, string? prefix = null)
     {
         int FreePort() { using var socket = new TcpListener(IPAddress.Loopback, 0); socket.Start(); return ((IPEndPoint)socket.LocalEndpoint).Port; }
         int ssPort = FreePort(), proxyPort = FreePort();
@@ -154,9 +245,35 @@ internal static class Program
             ["inbounds"] = new JsonArray(new JsonObject { ["type"] = "shadowsocks", ["listen"] = "127.0.0.1", ["listen_port"] = ssPort, ["method"] = "chacha20-ietf-poly1305", ["password"] = "loopback-fixture" }),
             ["outbounds"] = new JsonArray(new JsonObject { ["type"] = "direct", ["tag"] = "direct" }), ["route"] = new JsonObject { ["final"] = "direct" }
         };
-        var profile = new SerpiumParser().Parse(MakeKey("loopback-fixture", "127.0.0.1:" + ssPort)).Profile!;
+        string key = MakeKey("loopback-fixture", "127.0.0.1:" + ssPort);
+        if (prefix is not null) key = key.Replace("outline=1", "outline=1&prefix=" + prefix);
+        var profile = new SerpiumParser().Parse(key).Profile!;
         var clientConfig = (JsonObject)typeof(OutlineCandidateProbe).GetMethod("BuildProbeConfiguration", BindingFlags.Static | BindingFlags.NonPublic)!
             .Invoke(null, [profile, IPAddress.Loopback, proxyPort, "probe-fixture"])!;
+        using var prefixSession = new OutlinePrefixSession();
+        await prefixSession.PrepareAsync(clientConfig, Path.Combine(Path.GetDirectoryName(engine)!, OutlinePrefixConfiguration.ExecutableName), default);
+        if (prefix is not null)
+        {
+            Check(prefixSession.IsRunning && !clientConfig.ToJsonString().Contains(OutlinePrefixConfiguration.Marker), "runtime binds prefix helper without unsupported engine fields");
+            var rules = new[] { new RoutingRegistryEntry { Kind = RoutingTargetKind.Application, PrimaryValue = Environment.ProcessPath!, IsEnabled = true } };
+            using var native = OutlineProfileFactory.Create(profile);
+            using var otherSession = new OutlinePrefixSession();
+            using var prepared = await otherSession.PrepareAsync(native, Path.Combine(Path.GetDirectoryName(engine)!, OutlinePrefixConfiguration.ExecutableName), default);
+            using var compiled = SerpiumRoutingConfigCompiler.CompileProviderProfile(prepared, rules, null, applicationSelectionOnly: true);
+            CheckTunSession(compiled, "reopened Outline prefix profile reaches the real TUN session preflight");
+            byte[] compiledBytes = compiled.CopyConfiguration();
+            try
+            {
+                var firstRule = JsonNode.Parse(compiledBytes)!["route"]!["rules"]![0]!;
+                Check(firstRule["process_name"]![0]!.GetValue<string>() == "Serpium.Outline.exe" &&
+                    firstRule["outbound"]!.GetValue<string>() == "direct" && firstRule.AsObject().Count == 3,
+                    "adapter upstream bypasses all website and application VPN rules");
+            }
+            finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(compiledBytes); }
+            await EngineCheck(engine, compiled.CopyConfiguration());
+            await otherSession.StopAsync();
+            Check(!otherSession.IsRunning && !otherSession.Required, "helper stops and releases session state");
+        }
         Check(!clientConfig.ToJsonString().Contains("tun") && clientConfig["route"]!["final"]!.GetValue<string>() == "proxy", "probe configuration uses proxy without TUN or direct fallback");
         var processes = new List<Process>();
         var drains = new List<Task<string>>();
@@ -211,6 +328,7 @@ internal static class Program
                 process.Dispose();
             }
             await Task.WhenAll(drains);
+            await prefixSession.StopAsync();
         }
     }
 

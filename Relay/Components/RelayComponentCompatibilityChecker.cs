@@ -9,6 +9,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using SerpiumVPN.Relay.Parser;
+using SerpiumVPN.Relay.Outline;
 using SerpiumVPN.Relay.ProfileVault;
 using SerpiumVPN.Relay.Providers;
 using SerpiumVPN.Relay.Routing;
@@ -130,6 +131,7 @@ public sealed class RelayComponentCompatibilityChecker
     {
         try
         {
+            if (kind == RelayComponentKind.SingBox) config = OutlinePrefixConfiguration.PrepareCheck(config);
             using var deadline=CancellationTokenSource.CreateLinkedTokenSource(token);deadline.CancelAfter(TimeSpan.FromSeconds(20));
             using var process=Start(path,kind==RelayComponentKind.SingBox?["check","-c","stdin"]:["run","-test","-config","stdin:"]);
             var output=DrainAsync(process.StandardOutput);var errors=DrainAsync(process.StandardError);

@@ -6,6 +6,8 @@ using System.Security.Cryptography;
 using System.Text.Json;
 using System.Security.Principal;
 using Microsoft.Win32;
+using System.Runtime.InteropServices;
+using SerpiumVPN.Updates;
 
 namespace SerpiumUpdater;
 
@@ -33,6 +35,10 @@ internal static class Program
             string zipPath = Path.GetFullPath(Require(options, "zip"));
             string originalExePath = Path.GetFullPath(Require(options, "exe"));
             string updatedExePath = Path.Combine(targetDir, Path.GetFileName(originalExePath));
+            if (!string.Equals(originalExePath, Path.Combine(targetDir, "SerpiumVPN.exe"), StringComparison.OrdinalIgnoreCase))
+                throw new ArgumentException("Invalid application path.");
+            string expectedHash = Require(options, "sha256");
+            UpdatePackage.Verify(zipPath, expectedHash);
 
             if (options.TryGetValue("pid", out string? pidValue) && int.TryParse(pidValue, out int pid))
                 WaitForProcessExit(pid);
@@ -42,22 +48,14 @@ internal static class Program
             if (!File.Exists(zipPath))
                 throw new FileNotFoundException($"Update archive not found: {zipPath}");
 
-            string stagingDir = Path.Combine(Path.GetTempPath(), "SerpiumVPN_update_" + Guid.NewGuid().ToString("N"));
-            Directory.CreateDirectory(stagingDir);
-            Log($"Extracting {zipPath} to {stagingDir}");
-
             try
             {
-                ZipFile.ExtractToDirectory(zipPath, stagingDir, overwriteFiles: true);
-
-                Log($"Copying update to {targetDir}");
-                CopyDirectory(stagingDir, targetDir);
+                Log($"Installing checked update to {targetDir}");
+                UpdateInstaller.Install(zipPath, expectedHash, targetDir, Log);
                 LegacyPayloadCleanup.RemoveObsoleteFiles(targetDir, Log);
-
             }
             finally
             {
-                TryDeleteDirectory(stagingDir);
                 TryDeleteFile(zipPath);
             }
 
@@ -75,9 +73,13 @@ internal static class Program
         {
             Log("FATAL: " + ex);
             try { File.WriteAllText(Path.Combine(Path.GetTempPath(), "SerpiumUpdater_error.log"), ex.ToString()); } catch { }
+            MessageBoxW(IntPtr.Zero, ex.Message + "\n\nПодробности: SerpiumUpdater_error.log в папке временных файлов.", "Обновление Serpium", 0x10);
             return 1;
         }
     }
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int MessageBoxW(IntPtr owner, string text, string title, uint type);
 
     private static Dictionary<string, string> ParseArgs(string[] args)
     {
@@ -116,80 +118,6 @@ internal static class Program
         {
             Log("Main app was already closed.");
         }
-    }
-
-    private static void CopyDirectory(string sourceDir, string targetDir)
-    {
-        foreach (string sourcePath in Directory.EnumerateFiles(sourceDir, "*", SearchOption.AllDirectories))
-        {
-            string relativePath = Path.GetRelativePath(sourceDir, sourcePath);
-            if (ShouldSkip(relativePath)) continue;
-
-            string targetPath = Path.Combine(targetDir, relativePath);
-            Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
-            CopyFileWithRetry(sourcePath, targetPath);
-        }
-    }
-
-    private static void CopyFileWithRetry(string sourcePath, string targetPath)
-    {
-        if (FilesAreIdentical(sourcePath, targetPath))
-        {
-            Log($"Unchanged file skipped: {targetPath}");
-            return;
-        }
-
-        Exception? last = null;
-        for (int attempt = 1; attempt <= 10; attempt++)
-        {
-            try
-            {
-                File.Copy(sourcePath, targetPath, overwrite: true);
-                return;
-            }
-            catch (IOException ex)
-            {
-                last = ex;
-                Log($"Copy retry {attempt}/10: {targetPath}: {ex.Message}");
-                Thread.Sleep(500);
-            }
-            catch (UnauthorizedAccessException ex)
-            {
-                last = ex;
-                Log($"Access retry {attempt}/10: {targetPath}: {ex.Message}");
-                Thread.Sleep(500);
-            }
-        }
-
-        throw new IOException($"Failed to replace file after retries: {targetPath}", last);
-    }
-
-    private static bool FilesAreIdentical(string sourcePath, string targetPath)
-    {
-        if (!File.Exists(targetPath))
-            return false;
-
-        FileInfo sourceInfo = new(sourcePath);
-        FileInfo targetInfo = new(targetPath);
-
-        if (sourceInfo.Length != targetInfo.Length)
-            return false;
-
-        using FileStream sourceStream = File.OpenRead(sourcePath);
-        using FileStream targetStream = File.OpenRead(targetPath);
-
-        byte[] sourceHash = System.Security.Cryptography.SHA256.HashData(sourceStream);
-        byte[] targetHash = System.Security.Cryptography.SHA256.HashData(targetStream);
-
-        return sourceHash.AsSpan().SequenceEqual(targetHash);
-    }
-
-
-    private static bool ShouldSkip(string relativePath)
-    {
-        string normalized = relativePath.Replace('\\', '/');
-        return normalized.StartsWith("bin_files/logs/", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Equals("bin_files/serpium.runtime.json", StringComparison.OrdinalIgnoreCase);
     }
 
     private const string UninstallRegistryPath =
@@ -743,6 +671,5 @@ internal static class Program
         try { File.AppendAllText(LogPath, $"{DateTime.Now:O} {message}{Environment.NewLine}"); } catch { }
     }
 
-    private static void TryDeleteDirectory(string path) { try { if (Directory.Exists(path)) Directory.Delete(path, true); } catch { } }
     private static void TryDeleteFile(string path) { try { if (File.Exists(path)) File.Delete(path); } catch { } }
 }

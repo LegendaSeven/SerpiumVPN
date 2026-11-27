@@ -12,4 +12,12 @@ Source: https://github.com/XTLS/Xray-core
 License: Mozilla Public License Version 2.0
 License file: licenses/LICENSE_Xray-core_MPL-2.0.txt
 
-SerpiumVPN is an independent project and is not affiliated with SagerNet or XTLS.
+Outline SDK v0.1.0 - OutlineFoundation/outline-sdk
+TCP prefix transport adapter (Serpium.Outline.exe), standard UDP relay.
+Source: https://github.com/OutlineFoundation/outline-sdk/tree/v0.1.0
+License: Apache License 2.0
+License file: licenses/LICENSE_Outline_SDK_Apache-2.0.txt
+Dependency notices: licenses/NOTICE_Outline_Transport.txt
+Adapter source/build instructions: Native/Serpium.Outline
+
+SerpiumVPN is an independent project and is not affiliated with SagerNet, XTLS or Outline Foundation.

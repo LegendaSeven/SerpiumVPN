@@ -30,6 +30,7 @@ public static class SerpiumRoutingConfigCompiler
         StringComparer.OrdinalIgnoreCase)
     {
         "SerpiumVPN.exe",
+        "Serpium.Outline.exe",
         "sing-box.exe",
         "xray.exe",
         "xray-client.exe",
@@ -57,7 +58,8 @@ public static class SerpiumRoutingConfigCompiler
         ProviderRuntimeProfile sourceProfile,
         IReadOnlyList<RoutingRegistryEntry> registryEntries,
         string? ruleSetPath,
-        bool applicationSelectionOnly = false)
+        bool applicationSelectionOnly = false,
+        Guid? managedTunId = null)
     {
         ArgumentNullException.ThrowIfNull(sourceProfile);
         ArgumentNullException.ThrowIfNull(registryEntries);
@@ -73,6 +75,7 @@ public static class SerpiumRoutingConfigCompiler
         try
         {
             JsonObject root = ParseRoot(sourceConfiguration);
+            EnsureTunInbound(root, managedTunId ?? Guid.NewGuid());
             JsonObject route = RequireObject(root, "route");
             string proxyTag = ResolveProviderProxyTag(root, route);
             if (applicationSelectionOnly)
@@ -155,9 +158,6 @@ public static class SerpiumRoutingConfigCompiler
             throw new InvalidOperationException(
                 "Для Xray TUN включите хотя бы одно приложение или сайт.");
 
-        string interfaceName = "sproute-" + savedProfileId.ToString("N")[..6];
-        string tunAddress = BuildTunAddress(savedProfileId);
-
         JsonObject root = new()
         {
             ["log"] = new JsonObject
@@ -169,17 +169,7 @@ public static class SerpiumRoutingConfigCompiler
             },
             ["inbounds"] = new JsonArray
             {
-                new JsonObject
-                {
-                    ["type"] = "tun",
-                    ["tag"] = "tun-in",
-                    ["interface_name"] = interfaceName,
-                    ["address"] = new JsonArray(tunAddress),
-                    ["mtu"] = 1492,
-                    ["auto_route"] = true,
-                    ["endpoint_independent_nat"] = true,
-                    ["stack"] = "mixed"
-                }
+                CreateManagedTun(savedProfileId)
             },
             ["outbounds"] = new JsonArray
             {
@@ -568,6 +558,33 @@ public static class SerpiumRoutingConfigCompiler
         };
     }
 
+    private static void EnsureTunInbound(JsonObject root, Guid profileId)
+    {
+        if (root["inbounds"] is null)
+            root["inbounds"] = new JsonArray();
+        JsonArray inbounds = RequireArray(root, "inbounds");
+        if (inbounds.OfType<JsonObject>().Any(inbound =>
+            string.Equals(inbound["type"]?.GetValue<string>(), "tun", StringComparison.OrdinalIgnoreCase)))
+            return;
+        if (inbounds.OfType<JsonObject>().Any(inbound => inbound["tag"]?.GetValue<string>() == "tun-in"))
+            throw new FormatException("Конфигурация sing-box использует имя tun-in для другого входа.");
+        // Plain Outline/Hysteria2 keys only describe an outbound. Complete the
+        // runtime here, including older profiles already stored in the vault.
+        inbounds.Add(CreateManagedTun(profileId));
+    }
+
+    private static JsonObject CreateManagedTun(Guid profileId) => new()
+    {
+        ["type"] = "tun",
+        ["tag"] = "tun-in",
+        ["interface_name"] = "sproute-" + profileId.ToString("N")[..6],
+        ["address"] = new JsonArray(BuildTunAddress(profileId)),
+        ["mtu"] = 1492,
+        ["auto_route"] = true,
+        ["endpoint_independent_nat"] = true,
+        ["stack"] = "mixed"
+    };
+
     private static JsonObject CreateBaseDns(string proxyTag)
     {
         return new JsonObject
@@ -607,6 +624,15 @@ public static class SerpiumRoutingConfigCompiler
             rules = new JsonArray();
             route["rules"] = rules;
         }
+
+        // The adapter's upstream sockets must never re-enter their own VPN, even
+        // if a website rule happens to match the Shadowsocks server's domain.
+        rules.Insert(0, new JsonObject
+        {
+            ["process_name"] = new JsonArray("Serpium.Outline.exe"),
+            ["action"] = "route",
+            ["outbound"] = DirectOutboundTag
+        });
 
         rules.Add(new JsonObject
         {

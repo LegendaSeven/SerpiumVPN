@@ -21,7 +21,7 @@
                 <TextBlock Text="Serpium" FontSize="23" FontWeight="SemiBold" VerticalAlignment="Center"/>
             </StackPanel>
             <Button x:Name="UpdatesMenuButton" Grid.Column="1" VerticalAlignment="Center" Padding="12,10" MinHeight="42" Margin="0,0,10,0"
-                    Click="UpdatesMenu_Click" AutomationProperties.Name="Обновления компонентов">
+                    Click="UpdatesMenu_Click" AutomationProperties.Name="Обновления Serpium и компонентов">
                 <StackPanel Orientation="Horizontal">
                     <TextBlock Text="Обновления" VerticalAlignment="Center"/>
                     <Ellipse x:Name="UpdateBadge" Fill="{DynamicResource Theme.Accent}" Width="7" Height="7" Margin="8,0,0,0" Visibility="Collapsed"/>
@@ -29,9 +29,19 @@
             </Button>
             <Popup x:Name="ComponentUpdatesPopup" PlacementTarget="{Binding ElementName=UpdatesMenuButton}" Placement="Bottom"
                    StaysOpen="False" AllowsTransparency="True" PopupAnimation="None" KeyDown="Popup_KeyDown">
-                <Border Width="320" Padding="18" Margin="0,6,0,0" CornerRadius="16" Background="{DynamicResource Theme.Surface}"
+                <Border Width="350" Padding="18" Margin="0,6,0,0" CornerRadius="16" Background="{DynamicResource Theme.Surface}"
                         BorderBrush="{DynamicResource Theme.Border}" BorderThickness="1">
                     <StackPanel>
+                        <TextBlock x:Name="ProgramVersion" Text="Serpium" FontSize="16" FontWeight="SemiBold"/>
+                        <TextBlock x:Name="ProgramUpdateStatus" Foreground="{DynamicResource Theme.Muted}" FontSize="13" TextWrapping="Wrap" Margin="0,10,0,12" AutomationProperties.LiveSetting="Polite"/>
+                        <ProgressBar x:Name="ProgramDownloadProgress" Height="6" Minimum="0" Maximum="100" Visibility="Collapsed" Margin="0,0,0,12" Foreground="{DynamicResource Theme.Accent}" AutomationProperties.Name="Загрузка обновления Serpium"/>
+                        <WrapPanel>
+                            <Button x:Name="ProgramUpdateButton" Content="Проверить обновления" Click="ProgramUpdate_Click" Padding="12,8" MinHeight="36" Margin="0,0,6,6"/>
+                            <Button x:Name="ProgramUpdateCancelButton" Content="Отмена" Click="ProgramUpdateCancel_Click" Padding="12,8" MinHeight="36" Margin="0,0,0,6" Visibility="Collapsed"/>
+                        </WrapPanel>
+                        <Button x:Name="ProgramRecheckButton" Content="Проверить снова" Click="ProgramRecheck_Click" HorizontalAlignment="Left" Padding="12,6" Visibility="Collapsed"/>
+                        <CheckBox x:Name="AutomaticProgramChecks" Content="Проверять автоматически" Click="AutomaticProgramChecks_Click" Margin="0,8,0,0" Foreground="{DynamicResource Theme.Text}"/>
+                        <Border Height="1" Background="{DynamicResource Theme.Border}" Margin="0,18"/>
                         <TextBlock Text="Обновления компонентов" FontSize="16" FontWeight="SemiBold"/>
                         <TextBlock x:Name="ComponentUpdateStatus" Foreground="{DynamicResource Theme.Muted}" FontSize="13" TextWrapping="Wrap" Margin="0,10,0,14" AutomationProperties.LiveSetting="Polite"/>
                         <Button x:Name="ComponentUpdateButton" Content="Проверить обновления" Click="ComponentUpdate_Click" HorizontalAlignment="Left" Padding="12,8" MinHeight="36"/>

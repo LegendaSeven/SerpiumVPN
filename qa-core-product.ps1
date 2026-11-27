@@ -7,12 +7,13 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $required = @('SerpiumVPN.exe','SerpiumVPN.dll','SerpiumUpdater.exe','Assets/Serpium.App.ico',
-    'bin_files/relay/sing-box.exe','bin_files/relay/xray.exe','THIRD_PARTY_NOTICES.txt',
+    'bin_files/relay/sing-box.exe','bin_files/relay/xray.exe','bin_files/relay/Serpium.Outline.exe','THIRD_PARTY_NOTICES.txt',
+    'licenses/LICENSE_Outline_SDK_Apache-2.0.txt','licenses/NOTICE_Outline_Transport.txt',
     'licenses/LICENSE_sing-box_GPL-3.0-or-later.txt','licenses/LICENSE_Xray-core_MPL-2.0.txt')
 if ($Phase -eq 'Source') {
     [xml]$project = Get-Content -LiteralPath (Join-Path $Root 'SerpiumVPN.csproj') -Raw
     if ($ExpectedVersion -and $project.Project.PropertyGroup.Version -ne $ExpectedVersion) { throw 'Source version does not match release version.' }
-    foreach ($relative in @('Assets/Serpium.App.ico','Assets/Serpium.png','bin_files/relay/sing-box.exe','bin_files/relay/xray.exe')) {
+    foreach ($relative in @('Assets/Serpium.App.ico','Assets/Serpium.png','bin_files/relay/sing-box.exe','bin_files/relay/xray.exe','bin_files/relay/Serpium.Outline.exe')) {
         if (-not (Test-Path -LiteralPath (Join-Path $Root $relative) -PathType Leaf)) { throw "Missing source asset: $relative" }
     }
     if ($project.Project.ItemGroup.ProjectReference) { throw 'Unexpected plugin project dependency.' }
@@ -34,7 +35,7 @@ if ($Phase -eq 'Source') {
         if ($relative -match '(?i)(^|/)(Native|SerpiumNet|Plugins|Engines|SDK|tgws|wfp|logs|state|configs|cache|temp|tmp)(/|\.)|Serpium\.Engine|\.(pdb|log|tmp|sys|cat|inf)$|serpium\.runtime\.json|vendor_versions\.json') {
             throw "Unexpected release payload: $relative"
         }
-        if ($relative.StartsWith('bin_files/relay/') -and $relative -notmatch '^bin_files/relay/(sing-box\.exe|xray\.exe|sing-box\.version\.txt|xray\.version\.json|README_XRAY\.txt)$') {
+        if ($relative.StartsWith('bin_files/relay/') -and $relative -notmatch '^bin_files/relay/(sing-box\.exe|xray\.exe|Serpium\.Outline\.exe|sing-box\.version\.txt|xray\.version\.json|README_XRAY\.txt)$') {
             throw "Unexpected transport file: $relative"
         }
     }

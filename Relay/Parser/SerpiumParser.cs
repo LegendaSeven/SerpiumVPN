@@ -19,7 +19,7 @@ public sealed class SerpiumParser
 
     public SerpiumParseResult Parse(string? key)
     {
-        string normalized = key?.Trim() ?? string.Empty;
+        string normalized = ShadowsocksKeyParser.NormalizeScheme(key ?? string.Empty);
         if (string.IsNullOrWhiteSpace(normalized))
             return SerpiumParseResult.Fail("Вставьте VPN-ключ.");
 
